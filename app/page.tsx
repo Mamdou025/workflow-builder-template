@@ -34,7 +34,7 @@ function createDefaultTriggerNode() {
 
 const Home = () => {
   const router = useRouter();
-  const { data: session } = useSession();
+  const { data: session, isPending: sessionLoading } = useSession();
   const nodes = useAtomValue(nodesAtom);
   const edges = useAtomValue(edgesAtom);
   const setNodes = useSetAtom(nodesAtom);
@@ -60,8 +60,12 @@ const Home = () => {
   // Helper to create anonymous session if needed
   const ensureSession = useCallback(async () => {
     if (!session) {
-      await authClient.signIn.anonymous();
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      const result = await authClient.signIn.anonymous();
+      if (result.error) {
+        throw new Error(
+          result.error.message || "Failed to create anonymous session"
+        );
+      }
     }
   }, [session]);
 
@@ -102,6 +106,10 @@ const Home = () => {
       if (realNodes.length === 0 || hasCreatedWorkflowRef.current) {
         return;
       }
+
+      // Wait for session to finish loading before deciding whether to sign in anonymously
+      if (sessionLoading) return;
+
       hasCreatedWorkflowRef.current = true;
 
       try {
@@ -123,13 +131,14 @@ const Home = () => {
         console.log("[Homepage] Navigating to workflow page");
         router.replace(`/workflows/${newWorkflow.id}`);
       } catch (error) {
+        hasCreatedWorkflowRef.current = false;
         console.error("Failed to create workflow:", error);
         toast.error("Failed to create workflow");
       }
     };
 
     createWorkflowAndRedirect();
-  }, [nodes, edges, router, ensureSession, setIsTransitioningFromHomepage]);
+  }, [nodes, edges, router, session, sessionLoading, ensureSession, setIsTransitioningFromHomepage]);
 
   // Canvas and toolbar are rendered by PersistentCanvas in the layout
   return null;
