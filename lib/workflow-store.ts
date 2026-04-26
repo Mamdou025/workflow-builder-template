@@ -10,6 +10,14 @@ export type WorkflowNodeData = {
   description?: string;
   type: WorkflowNodeType;
   config?: Record<string, unknown>;
+  visualLevel?: "L1" | "L2" | "L3";
+  visualRole?:
+    | "stage"
+    | "step"
+    | "calculation"
+    | "review"
+    | "source"
+    | "evidence";
   status?: "idle" | "running" | "success" | "error";
   enabled?: boolean; // Whether the step is enabled (defaults to true)
   onClick?: () => void; // For the "add" node type
