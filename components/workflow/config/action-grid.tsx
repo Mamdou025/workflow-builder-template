@@ -39,6 +39,39 @@ type ActionType = {
   integration?: string;
 };
 
+const WORKFLOW_STRUCTURE_ACTIONS: ActionType[] = [
+  {
+    id: "preset:stage-layer",
+    label: "Stage / Layer",
+    description: "Create a high-level stage or section node",
+    category: "Workflow Structure",
+  },
+  {
+    id: "preset:step-block",
+    label: "Step / Block",
+    description: "Create a standard operational step node",
+    category: "Workflow Structure",
+  },
+  {
+    id: "preset:calculation-step",
+    label: "Calculation Step",
+    description: "Create a calculation-oriented operational node",
+    category: "Workflow Structure",
+  },
+  {
+    id: "preset:review-step",
+    label: "Review Step",
+    description: "Create a review-oriented operational node",
+    category: "Workflow Structure",
+  },
+  {
+    id: "preset:source-evidence",
+    label: "Source / Evidence",
+    description: "Create a source or evidence placeholder node",
+    category: "Workflow Structure",
+  },
+];
+
 // System actions that don't have plugins
 const SYSTEM_ACTIONS: ActionType[] = [
   {
@@ -75,7 +108,11 @@ function useAllActions(): ActionType[] {
       integration: action.integration,
     }));
 
-    return [...SYSTEM_ACTIONS, ...mappedPluginActions];
+    return [
+      ...WORKFLOW_STRUCTURE_ACTIONS,
+      ...SYSTEM_ACTIONS,
+      ...mappedPluginActions,
+    ];
   }, []);
 }
 
@@ -236,6 +273,12 @@ export function ActionGrid({
 
     // Sort categories: System first, then alphabetically
     const sortedCategories = Object.keys(groups).sort((a, b) => {
+      if (a === "Workflow Structure") {
+        return -1;
+      }
+      if (b === "Workflow Structure") {
+        return 1;
+      }
       if (a === "System") {
         return -1;
       }
