@@ -254,7 +254,6 @@ const getVisualPlaceholderDescription = (
   }
   return "Select an action";
 };
-
 // Generated image thumbnail with zoom dialog
 function GeneratedImageThumbnail({ base64 }: { base64: string }) {
   const [dialogOpen, setDialogOpen] = useState(false);
