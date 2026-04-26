@@ -197,6 +197,38 @@ const ModelBadge = ({ model }: { model: string }) => {
   );
 };
 
+const getVisualLevelClasses = (
+  visualLevel: WorkflowNodeData["visualLevel"]
+): string => {
+  if (visualLevel === "L1") {
+    return "h-56 w-64 rounded-3xl border-2 shadow-lg";
+  }
+  if (visualLevel === "L3") {
+    return "h-40 w-44 rounded-2xl border border-dashed bg-card/85";
+  }
+  return "h-48 w-48";
+};
+
+const getVisualBadgeText = (
+  visualLevel: WorkflowNodeData["visualLevel"],
+  visualRole: WorkflowNodeData["visualRole"]
+): string | null => {
+  if (!visualLevel) {
+    return null;
+  }
+
+  let fallbackRole: NonNullable<WorkflowNodeData["visualRole"]> = "step";
+  if (visualLevel === "L1") {
+    fallbackRole = "stage";
+  } else if (visualLevel === "L3") {
+    fallbackRole = "source";
+  }
+  const role = visualRole || fallbackRole;
+  const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
+
+  return `${visualLevel} • ${roleLabel}`;
+};
+
 // Generated image thumbnail with zoom dialog
 function GeneratedImageThumbnail({ base64 }: { base64: string }) {
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -358,11 +390,14 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
 
   const aiModel = getAiModel();
   const isDisabled = data.enabled === false;
+  const levelClasses = getVisualLevelClasses(data.visualLevel);
+  const visualBadge = getVisualBadgeText(data.visualLevel, data.visualRole);
 
   return (
     <Node
       className={cn(
-        "relative flex h-48 w-48 flex-col items-center justify-center shadow-none transition-all duration-150 ease-out",
+        "relative flex flex-col items-center justify-center shadow-none transition-all duration-150 ease-out",
+        levelClasses,
         selected && "border-primary",
         isDisabled && "opacity-50"
       )}
@@ -386,6 +421,13 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
 
       {/* Status indicator badge in top right */}
       <StatusBadge status={status} />
+
+      {/* Visual hierarchy badge */}
+      {visualBadge && (
+        <div className="-translate-x-1/2 absolute top-2 left-1/2 rounded-full border border-border/60 bg-background/90 px-2 py-0.5 font-medium text-[10px] text-muted-foreground">
+          {visualBadge}
+        </div>
+      )}
 
       <div className="flex flex-col items-center justify-center gap-3 p-6">
         {hasGeneratedImage ? (
