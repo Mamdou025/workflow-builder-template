@@ -59,15 +59,30 @@ const Home = () => {
 
   // Helper to create anonymous session if needed
   const ensureSession = useCallback(async () => {
-    if (!session) {
+    if (session?.user) {
+      return true;
+    }
+
+    const attemptSignIn = async () => {
       const result = await authClient.signIn.anonymous();
-      if (result.error) {
-        throw new Error(
-          result.error.message || "Failed to create anonymous session"
+      return !result.error;
+    };
+
+    const firstAttemptSuccessful = await attemptSignIn();
+    if (!firstAttemptSuccessful) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const secondAttemptSuccessful = await attemptSignIn();
+      if (!secondAttemptSuccessful) {
+        toast.error(
+          "Unable to start a guest session. Please sign in to continue."
         );
+        return false;
       }
     }
-  }, [session]);
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return true;
+  }, [session?.user]);
 
   // Handler to add the first node (replaces the "add" node)
   const handleAddNode = useCallback(() => {
@@ -113,7 +128,11 @@ const Home = () => {
       hasCreatedWorkflowRef.current = true;
 
       try {
-        await ensureSession();
+        const hasSession = await ensureSession();
+        if (!hasSession) {
+          hasCreatedWorkflowRef.current = false;
+          return;
+        }
 
         // Create workflow with all real nodes
         const newWorkflow = await api.workflow.create({
