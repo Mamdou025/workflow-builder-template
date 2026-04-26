@@ -8,7 +8,9 @@ import {
   Code,
   Database,
   EyeOff,
+  FileText,
   GitBranch,
+  Layers,
   XCircle,
   Zap,
 } from "lucide-react";
@@ -307,6 +309,8 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
   // Handle empty action type (new node without selected action)
   if (!actionType) {
     const isDisabled = data.enabled === false;
+    const levelClasses = getVisualLevelClasses(data.visualLevel);
+    const visualBadge = getVisualBadgeText(data.visualLevel, data.visualRole);
     const openActionPicker = () => {
       setSelectedNode(id);
       setSelectedEdge(null);
@@ -317,7 +321,8 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
     return (
       <Node
         className={cn(
-          "flex h-48 w-48 flex-col items-center justify-center shadow-none transition-all duration-150 ease-out",
+          "relative flex flex-col items-center justify-center shadow-none transition-all duration-150 ease-out",
+          levelClasses,
           selected && "border-primary",
           isDisabled && "opacity-50"
         )}
@@ -325,9 +330,20 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
         handles={{ target: true, source: true }}
         status={status}
       >
+        {data.visualLevel === "L1" && (
+          <div className="absolute inset-x-0 top-0 h-8 rounded-t-2xl bg-indigo-500/20" />
+        )}
+        {data.visualLevel === "L2" && (
+          <div className="absolute inset-x-0 top-0 h-1 rounded-t-2xl bg-blue-500/60" />
+        )}
         {isDisabled && (
           <div className="absolute top-2 left-2 rounded-full bg-gray-500/50 p-1">
             <EyeOff className="size-3.5 text-white" />
+          </div>
+        )}
+        {visualBadge && (
+          <div className="-translate-x-1/2 absolute top-2 left-1/2 rounded-full border border-border/60 bg-background/90 px-2 py-0.5 font-medium text-[10px] text-muted-foreground">
+            {visualBadge}
           </div>
         )}
         <button
@@ -338,13 +354,13 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
           }}
           type="button"
         >
-          <Zap className="size-12 text-muted-foreground" strokeWidth={1.5} />
+          {getVisualPlaceholderIcon(data.visualLevel)}
           <div className="flex flex-col items-center gap-1 text-center">
             <NodeTitle className="text-base">
               {data.label || "Action"}
             </NodeTitle>
             <NodeDescription className="text-xs">
-              Select an action
+              {getVisualPlaceholderDescription(data.visualLevel)}
             </NodeDescription>
           </div>
         </button>

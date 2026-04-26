@@ -1,7 +1,15 @@
 "use client";
 
 import type { NodeProps } from "@xyflow/react";
-import { Check, Clock, Play, Webhook, XCircle } from "lucide-react";
+import {
+  Check,
+  Clock,
+  FileText,
+  Layers,
+  Play,
+  Webhook,
+  XCircle,
+} from "lucide-react";
 import { memo } from "react";
 import {
   Node,
@@ -77,13 +85,19 @@ export const TriggerNode = memo(({ data, selected }: TriggerNodeProps) => {
       handles={{ target: false, source: true }}
       status={status}
     >
+      {data.visualLevel === "L1" && (
+        <div className="absolute inset-x-0 top-0 h-8 rounded-t-2xl bg-indigo-500/20" />
+      )}
+      {data.visualLevel === "L2" && (
+        <div className="absolute inset-x-0 top-0 h-1 rounded-t-2xl bg-blue-500/60" />
+      )}
+
       {/* Status indicator badge in top right */}
       {status && status !== "idle" && status !== "running" && (
         <div
           className={cn(
             "absolute top-2 right-2 rounded-full p-1",
-            status === "success" && "bg-green-500/50",
-            status === "error" && "bg-red-500/50"
+            getStatusBadgeClass(status)
           )}
         >
           {status === "success" && (

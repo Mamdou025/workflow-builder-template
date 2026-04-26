@@ -24,6 +24,13 @@ import { Button } from "@/components/ui/button";
 import { CodeEditor } from "@/components/ui/code-editor";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { api } from "@/lib/api-client";
 import { integrationsAtom } from "@/lib/integrations-store";
 import type { IntegrationType } from "@/lib/types/integration";
@@ -65,6 +72,16 @@ const WORD_SPLIT_REGEX = /\s+/;
 const SYSTEM_ACTION_INTEGRATIONS: Record<string, IntegrationType> = {
   "Database Query": "database",
 };
+
+const VISUAL_LEVELS = ["L1", "L2", "L3"] as const;
+const VISUAL_ROLES = [
+  "stage",
+  "step",
+  "calculation",
+  "review",
+  "source",
+  "evidence",
+] as const;
 
 // Multi-selection panel component
 const MultiSelectionPanel = ({
@@ -440,6 +457,122 @@ export const PanelInner = () => {
     }
   };
 
+  const handleApplyVisualPreset = (presetId: string) => {
+    if (!selectedNode) {
+      return;
+    }
+
+    if (selectedNode.data.type !== "action") {
+      return;
+    }
+
+    const presetMap: Record<
+      string,
+      {
+        label: string;
+        description: string;
+        visualLevel: "L1" | "L2" | "L3";
+        visualRole:
+          | "stage"
+          | "step"
+          | "calculation"
+          | "review"
+          | "source"
+          | "evidence";
+      }
+    > = {
+      "preset:stage-layer": {
+        label: "New Stage",
+        description: "High-level stage",
+        visualLevel: "L1",
+        visualRole: "stage",
+      },
+      "preset:step-block": {
+        label: "New Step",
+        description: "Operational step",
+        visualLevel: "L2",
+        visualRole: "step",
+      },
+      "preset:calculation-step": {
+        label: "New Calculation Step",
+        description: "Calculation step",
+        visualLevel: "L2",
+        visualRole: "calculation",
+      },
+      "preset:review-step": {
+        label: "Review Step",
+        description: "Review step",
+        visualLevel: "L2",
+        visualRole: "review",
+      },
+      "preset:source-evidence": {
+        label: "New Source",
+        description: "Source evidence placeholder",
+        visualLevel: "L3",
+        visualRole: "source",
+      },
+    };
+
+    const preset = presetMap[presetId];
+    if (!preset) {
+      return;
+    }
+
+    const configWithoutActionType = Object.fromEntries(
+      Object.entries(selectedNode.data.config ?? {}).filter(
+        ([key]) => key !== "actionType" && key !== "integrationId"
+      )
+    );
+
+    updateNodeData({
+      id: selectedNode.id,
+      data: {
+        label:
+          selectedNode.data.label && selectedNode.data.label.trim().length > 0
+            ? selectedNode.data.label
+            : preset.label,
+        description:
+          selectedNode.data.description &&
+          selectedNode.data.description.trim().length > 0
+            ? selectedNode.data.description
+            : preset.description,
+        visualLevel: preset.visualLevel,
+        visualRole: preset.visualRole,
+        config: configWithoutActionType,
+      },
+    });
+  };
+
+  const handleUpdateVisualLevel = (value: string) => {
+    if (!selectedNode) {
+      return;
+    }
+    updateNodeData({
+      id: selectedNode.id,
+      data: {
+        visualLevel: value as "L1" | "L2" | "L3",
+      },
+    });
+  };
+
+  const handleUpdateVisualRole = (value: string) => {
+    if (!selectedNode) {
+      return;
+    }
+    updateNodeData({
+      id: selectedNode.id,
+      data: {
+        visualRole: value as
+          | "stage"
+          | "step"
+          | "calculation"
+          | "review"
+          | "source"
+          | "evidence",
+      },
+    });
+  };
+
   const handleUpdateWorkspaceName = async (newName: string) => {
     setCurrentWorkflowName(newName);
 
@@ -788,12 +921,21 @@ export const PanelInner = () => {
           {/* Action selection - full height flex layout */}
           {selectedNode.data.type === "action" &&
             !selectedNode.data.config?.actionType &&
+            !selectedNode.data.visualLevel &&
             isOwner && (
               <div className="flex min-h-0 flex-1 flex-col px-4 pt-4">
                 <ActionGrid
                   disabled={isGenerating}
                   isNewlyCreated={selectedNode?.id === newlyCreatedNodeId}
                   onSelectAction={(actionType) => {
+                    if (actionType.startsWith("preset:")) {
+                      handleApplyVisualPreset(actionType);
+                      if (selectedNode?.id === newlyCreatedNodeId) {
+                        setNewlyCreatedNodeId(null);
+                      }
+                      return;
+                    }
+
                     handleUpdateConfig("actionType", actionType);
                     // Clear newly created tracking once action is selected
                     if (selectedNode?.id === newlyCreatedNodeId) {
@@ -808,6 +950,7 @@ export const PanelInner = () => {
           {!(
             selectedNode.data.type === "action" &&
             !selectedNode.data.config?.actionType &&
+            !selectedNode.data.visualLevel &&
             isOwner
           ) && (
             <div className="flex-1 space-y-4 overflow-y-auto p-4">
@@ -831,7 +974,8 @@ export const PanelInner = () => {
                 )}
 
               {selectedNode.data.type === "action" &&
-              selectedNode.data.config?.actionType ? (
+              (selectedNode.data.config?.actionType ||
+                selectedNode.data.visualLevel) ? (
                 <ActionConfig
                   config={selectedNode.data.config || {}}
                   disabled={isGenerating || !isOwner}
@@ -841,8 +985,47 @@ export const PanelInner = () => {
               ) : null}
 
               {selectedNode.data.type !== "action" ||
-              selectedNode.data.config?.actionType ? (
+              selectedNode.data.config?.actionType ||
+              selectedNode.data.visualLevel ? (
                 <>
+                  <div className="space-y-2">
+                    <Label className="ml-1">Visual Type</Label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Select
+                        disabled={!isOwner || isGenerating}
+                        onValueChange={handleUpdateVisualLevel}
+                        value={selectedNode.data.visualLevel || "L2"}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Visual level" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {VISUAL_LEVELS.map((level) => (
+                            <SelectItem key={level} value={level}>
+                              {level}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Select
+                        disabled={!isOwner || isGenerating}
+                        onValueChange={handleUpdateVisualRole}
+                        value={selectedNode.data.visualRole || "step"}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Visual role" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {VISUAL_ROLES.map((role) => (
+                            <SelectItem key={role} value={role}>
+                              {role.charAt(0).toUpperCase() + role.slice(1)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+
                   <div className="space-y-2">
                     <Label className="ml-1" htmlFor="label">
                       Label
