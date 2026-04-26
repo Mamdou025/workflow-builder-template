@@ -55,35 +55,6 @@ const getVisualBadgeText = (
   return `${visualLevel} • ${roleLabel}`;
 };
 
-const getTriggerIcon = (
-  triggerType: string,
-  visualLevel: WorkflowNodeData["visualLevel"]
-) => {
-  if (visualLevel === "L1") {
-    return Layers;
-  }
-  if (visualLevel === "L3") {
-    return FileText;
-  }
-  if (triggerType === "Schedule") {
-    return Clock;
-  }
-  if (triggerType === "Webhook") {
-    return Webhook;
-  }
-  return Play;
-};
-
-const getStatusBadgeClass = (status: WorkflowNodeData["status"]) => {
-  if (status === "success") {
-    return "bg-green-500/50";
-  }
-  if (status === "error") {
-    return "bg-red-500/50";
-  }
-  return "";
-};
-
 export const TriggerNode = memo(({ data, selected }: TriggerNodeProps) => {
   if (!data) {
     return null;
@@ -95,7 +66,14 @@ export const TriggerNode = memo(({ data, selected }: TriggerNodeProps) => {
   const status = data.status;
   const levelClasses = getVisualLevelClasses(data.visualLevel);
   const visualBadge = getVisualBadgeText(data.visualLevel, data.visualRole);
-  const TriggerIcon = getTriggerIcon(triggerType, data.visualLevel);
+
+  // Select icon based on trigger type
+  let TriggerIcon = Play;
+  if (triggerType === "Schedule") {
+    TriggerIcon = Clock;
+  } else if (triggerType === "Webhook") {
+    TriggerIcon = Webhook;
+  }
 
   return (
     <Node

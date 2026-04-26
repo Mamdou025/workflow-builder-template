@@ -231,30 +231,6 @@ const getVisualBadgeText = (
   return `${visualLevel} • ${roleLabel}`;
 };
 
-const getVisualPlaceholderIcon = (
-  visualLevel: WorkflowNodeData["visualLevel"]
-) => {
-  if (visualLevel === "L1") {
-    return <Layers className="size-12 text-indigo-400" strokeWidth={1.5} />;
-  }
-  if (visualLevel === "L3") {
-    return <FileText className="size-12 text-amber-400" strokeWidth={1.5} />;
-  }
-  return <Zap className="size-12 text-muted-foreground" strokeWidth={1.5} />;
-};
-
-const getVisualPlaceholderDescription = (
-  visualLevel: WorkflowNodeData["visualLevel"]
-) => {
-  if (visualLevel === "L1") {
-    return "High-level stage";
-  }
-  if (visualLevel === "L3") {
-    return "Source / evidence";
-  }
-  return "Select an action";
-};
-
 // Generated image thumbnail with zoom dialog
 function GeneratedImageThumbnail({ base64 }: { base64: string }) {
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -467,12 +443,6 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
         <div className="-translate-x-1/2 absolute top-2 left-1/2 rounded-full border border-border/60 bg-background/90 px-2 py-0.5 font-medium text-[10px] text-muted-foreground">
           {visualBadge}
         </div>
-      )}
-      {data.visualLevel === "L1" && (
-        <div className="absolute inset-x-0 top-0 h-8 rounded-t-2xl bg-indigo-500/20" />
-      )}
-      {data.visualLevel === "L2" && (
-        <div className="absolute inset-x-0 top-0 h-1 rounded-t-2xl bg-blue-500/60" />
       )}
 
       <div className="flex flex-col items-center justify-center gap-3 p-6">
