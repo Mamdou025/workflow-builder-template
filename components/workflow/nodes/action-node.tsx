@@ -1,7 +1,7 @@
 "use client";
 
 import type { NodeProps } from "@xyflow/react";
-import { useAtomValue } from "jotai";
+import { useAtomValue, useSetAtom } from "jotai";
 import {
   AlertTriangle,
   Check,
@@ -19,6 +19,8 @@ import {
   NodeDescription,
   NodeTitle,
 } from "@/components/ai-elements/node";
+import { ConfigurationOverlay } from "@/components/overlays/configuration-overlay";
+import { useOverlay } from "@/components/overlays/overlay-provider";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   integrationIdsAtom,
@@ -28,7 +30,10 @@ import { cn } from "@/lib/utils";
 import {
   executionLogsAtom,
   pendingIntegrationNodesAtom,
+  propertiesPanelActiveTabAtom,
+  selectedEdgeAtom,
   selectedExecutionIdAtom,
+  selectedNodeAtom,
   type WorkflowNodeData,
 } from "@/lib/workflow-store";
 import { findActionById, getIntegration } from "@/plugins";
@@ -242,11 +247,15 @@ type ActionNodeProps = NodeProps & {
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Complex UI logic with multiple conditions including disabled state
 export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
+  const { open: openOverlay } = useOverlay();
   const selectedExecutionId = useAtomValue(selectedExecutionIdAtom);
   const executionLogs = useAtomValue(executionLogsAtom);
   const pendingIntegrationNodes = useAtomValue(pendingIntegrationNodesAtom);
   const availableIntegrationIds = useAtomValue(integrationIdsAtom);
   const integrationsLoaded = useAtomValue(integrationsLoadedAtom);
+  const setSelectedNode = useSetAtom(selectedNodeAtom);
+  const setSelectedEdge = useSetAtom(selectedEdgeAtom);
+  const setActiveTab = useSetAtom(propertiesPanelActiveTabAtom);
 
   if (!data) {
     return null;
@@ -266,6 +275,13 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
   // Handle empty action type (new node without selected action)
   if (!actionType) {
     const isDisabled = data.enabled === false;
+    const openActionPicker = () => {
+      setSelectedNode(id);
+      setSelectedEdge(null);
+      setActiveTab("properties");
+      openOverlay(ConfigurationOverlay, {});
+    };
+
     return (
       <Node
         className={cn(
@@ -282,7 +298,14 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
             <EyeOff className="size-3.5 text-white" />
           </div>
         )}
-        <div className="flex flex-col items-center justify-center gap-3 p-6">
+        <button
+          className="nodrag nopan flex flex-col items-center justify-center gap-3 p-6 text-center"
+          onClick={(event) => {
+            event.stopPropagation();
+            openActionPicker();
+          }}
+          type="button"
+        >
           <Zap className="size-12 text-muted-foreground" strokeWidth={1.5} />
           <div className="flex flex-col items-center gap-1 text-center">
             <NodeTitle className="text-base">
@@ -292,7 +315,7 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
               Select an action
             </NodeDescription>
           </div>
-        </div>
+        </button>
       </Node>
     );
   }
