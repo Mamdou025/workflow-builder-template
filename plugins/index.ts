@@ -14,20 +14,20 @@
  * 2. Run: pnpm discover-plugins (or it runs automatically on build)
  */
 
-import "./ai-gateway";
-import "./blob";
-import "./clerk";
-import "./fal";
-import "./firecrawl";
-import "./github";
-import "./linear";
-import "./perplexity";
-import "./resend";
-import "./slack";
-import "./stripe";
-import "./superagent";
-import "./v0";
-import "./webflow";
+import "./ai-gateway/index";
+import "./blob/index";
+import "./clerk/index";
+import "./fal/index";
+import "./firecrawl/index";
+import "./github/index";
+import "./linear/index";
+import "./perplexity/index";
+import "./resend/index";
+import "./slack/index";
+import "./stripe/index";
+import "./superagent/index";
+import "./v0/index";
+import "./webflow/index";
 
 export type {
   ActionConfigField,

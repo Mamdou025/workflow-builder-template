@@ -2,6 +2,10 @@ import type { Edge, EdgeChange, Node, NodeChange } from "@xyflow/react";
 import { applyEdgeChanges, applyNodeChanges } from "@xyflow/react";
 import { atom } from "jotai";
 import { api } from "./api-client";
+import {
+  isLocalWorkflowId,
+  saveLocalWorkflowSnapshot,
+} from "./local-fiscal-workflow";
 
 export type WorkflowNodeType = "trigger" | "action" | "add";
 
@@ -16,8 +20,12 @@ export type WorkflowNodeData = {
     | "step"
     | "calculation"
     | "review"
+    | "validation"
     | "source"
-    | "evidence";
+    | "evidence"
+    | "logic"
+    | "protected"
+    | "output";
   status?: "idle" | "running" | "success" | "error";
   enabled?: boolean; // Whether the step is enabled (defaults to true)
   onClick?: () => void; // For the "add" node type
@@ -88,6 +96,7 @@ export const autosaveAtom = atom(
     const workflowId = get(currentWorkflowIdAtom);
     const nodes = get(nodesAtom);
     const edges = get(edgesAtom);
+    const workflowName = get(currentWorkflowNameAtom);
 
     // Only autosave if we have a workflow ID
     if (!workflowId) {
@@ -96,6 +105,12 @@ export const autosaveAtom = atom(
 
     const saveFunc = async () => {
       try {
+        if (isLocalWorkflowId(workflowId)) {
+          saveLocalWorkflowSnapshot({ name: workflowName, nodes, edges });
+          set(hasUnsavedChangesAtom, false);
+          return;
+        }
+
         await api.workflow.update(workflowId, { nodes, edges });
         // Clear the unsaved changes indicator after successful save
         set(hasUnsavedChangesAtom, false);

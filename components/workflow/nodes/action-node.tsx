@@ -8,9 +8,7 @@ import {
   Code,
   Database,
   EyeOff,
-  FileText,
   GitBranch,
-  Layers,
   XCircle,
   Zap,
 } from "lucide-react";
@@ -39,6 +37,14 @@ import {
   type WorkflowNodeData,
 } from "@/lib/workflow-store";
 import { findActionById, getIntegration } from "@/plugins";
+import {
+  getVisualBadgeText,
+  getVisualLevelStyle,
+  getVisualPlaceholderDescription,
+  resolveVisualLevel,
+  VisualLevelDecor,
+  VisualLevelIcon,
+} from "./visual-level";
 
 // Helper to get display name for AI model
 const getModelDisplayName = (modelId: string): string => {
@@ -199,61 +205,6 @@ const ModelBadge = ({ model }: { model: string }) => {
   );
 };
 
-const getVisualLevelClasses = (
-  visualLevel: WorkflowNodeData["visualLevel"]
-): string => {
-  if (visualLevel === "L1") {
-    return "h-56 w-64 rounded-3xl border-2 shadow-lg";
-  }
-  if (visualLevel === "L3") {
-    return "h-40 w-44 rounded-2xl border border-dashed bg-card/85";
-  }
-  return "h-48 w-48";
-};
-
-const getVisualBadgeText = (
-  visualLevel: WorkflowNodeData["visualLevel"],
-  visualRole: WorkflowNodeData["visualRole"]
-): string | null => {
-  if (!visualLevel) {
-    return null;
-  }
-
-  let fallbackRole: NonNullable<WorkflowNodeData["visualRole"]> = "step";
-  if (visualLevel === "L1") {
-    fallbackRole = "stage";
-  } else if (visualLevel === "L3") {
-    fallbackRole = "source";
-  }
-  const role = visualRole || fallbackRole;
-  const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
-
-  return `${visualLevel} • ${roleLabel}`;
-};
-
-const getVisualPlaceholderIcon = (
-  visualLevel: WorkflowNodeData["visualLevel"]
-) => {
-  if (visualLevel === "L1") {
-    return <Layers className="size-12 text-indigo-400" strokeWidth={1.5} />;
-  }
-  if (visualLevel === "L3") {
-    return <FileText className="size-12 text-amber-400" strokeWidth={1.5} />;
-  }
-  return <Zap className="size-12 text-muted-foreground" strokeWidth={1.5} />;
-};
-
-const getVisualPlaceholderDescription = (
-  visualLevel: WorkflowNodeData["visualLevel"]
-) => {
-  if (visualLevel === "L1") {
-    return "High-level stage";
-  }
-  if (visualLevel === "L3") {
-    return "Source / evidence";
-  }
-  return "Select an action";
-};
 // Generated image thumbnail with zoom dialog
 function GeneratedImageThumbnail({ base64 }: { base64: string }) {
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -332,8 +283,9 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
   // Handle empty action type (new node without selected action)
   if (!actionType) {
     const isDisabled = data.enabled === false;
-    const levelClasses = getVisualLevelClasses(data.visualLevel);
-    const visualBadge = getVisualBadgeText(data.visualLevel, data.visualRole);
+    const visualLevel = resolveVisualLevel(data);
+    const visualStyle = getVisualLevelStyle(visualLevel);
+    const visualBadge = getVisualBadgeText(visualLevel, data.visualRole);
     const openActionPicker = () => {
       setSelectedNode(id);
       setSelectedEdge(null);
@@ -345,45 +297,54 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
       <Node
         className={cn(
           "relative flex flex-col items-center justify-center shadow-none transition-all duration-150 ease-out",
-          levelClasses,
-          selected && "border-primary",
+          visualStyle.nodeClassName,
+          selected &&
+            "ring-2 ring-primary/70 ring-offset-2 ring-offset-background",
           isDisabled && "opacity-50"
         )}
         data-testid={`action-node-${id}`}
         handles={{ target: true, source: true }}
         status={status}
       >
-        {data.visualLevel === "L1" && (
-          <div className="absolute inset-x-0 top-0 h-8 rounded-t-2xl bg-indigo-500/20" />
-        )}
-        {data.visualLevel === "L2" && (
-          <div className="absolute inset-x-0 top-0 h-1 rounded-t-2xl bg-blue-500/60" />
-        )}
+        <VisualLevelDecor visualLevel={visualLevel} />
         {isDisabled && (
           <div className="absolute top-2 left-2 rounded-full bg-gray-500/50 p-1">
             <EyeOff className="size-3.5 text-white" />
           </div>
         )}
         {visualBadge && (
-          <div className="-translate-x-1/2 absolute top-2 left-1/2 rounded-full border border-border/60 bg-background/90 px-2 py-0.5 font-medium text-[10px] text-muted-foreground">
+          <div
+            className={cn(
+              "-translate-x-1/2 absolute left-1/2 z-10 rounded-full border px-2 py-0.5 font-semibold text-[10px]",
+              visualStyle.badgeClassName
+            )}
+          >
             {visualBadge}
           </div>
         )}
         <button
-          className="nodrag nopan flex flex-col items-center justify-center gap-3 p-6 text-center"
+          className={cn(
+            "relative z-10 flex flex-col items-center justify-center text-center",
+            visualStyle.contentClassName
+          )}
           onClick={(event) => {
             event.stopPropagation();
             openActionPicker();
           }}
           type="button"
         >
-          {getVisualPlaceholderIcon(data.visualLevel)}
-          <div className="flex flex-col items-center gap-1 text-center">
-            <NodeTitle className="text-base">
+          <VisualLevelIcon visualLevel={visualLevel} />
+          <div
+            className={cn(
+              "-translate-x-1/2 absolute top-[calc(100%+0.5rem)] left-1/2 flex flex-col items-center gap-0.5 text-center",
+              visualStyle.captionClassName
+            )}
+          >
+            <NodeTitle className="max-w-full truncate text-sm leading-tight">
               {data.label || "Action"}
             </NodeTitle>
-            <NodeDescription className="text-xs">
-              {getVisualPlaceholderDescription(data.visualLevel)}
+            <NodeDescription className="max-w-full truncate text-[11px] leading-tight">
+              {getVisualPlaceholderDescription(visualLevel)}
             </NodeDescription>
           </div>
         </button>
@@ -429,21 +390,44 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
 
   const aiModel = getAiModel();
   const isDisabled = data.enabled === false;
-  const levelClasses = getVisualLevelClasses(data.visualLevel);
-  const visualBadge = getVisualBadgeText(data.visualLevel, data.visualRole);
+  const visualLevel = resolveVisualLevel(data);
+  const visualStyle = getVisualLevelStyle(visualLevel);
+  const visualBadge = getVisualBadgeText(visualLevel, data.visualRole);
+  let nodeIcon = (
+    <VisualLevelIcon visualLevel={visualLevel}>
+      {getProviderLogo(actionType)}
+    </VisualLevelIcon>
+  );
+
+  if (hasGeneratedImage) {
+    nodeIcon = (
+      <VisualLevelIcon visualLevel={visualLevel}>
+        <GeneratedImageThumbnail
+          base64={(nodeLog.output as { base64: string }).base64}
+        />
+      </VisualLevelIcon>
+    );
+  }
+
+  if (visualLevel) {
+    nodeIcon = <VisualLevelIcon visualLevel={visualLevel} />;
+  }
 
   return (
     <Node
       className={cn(
         "relative flex flex-col items-center justify-center shadow-none transition-all duration-150 ease-out",
-        levelClasses,
-        selected && "border-primary",
+        visualStyle.nodeClassName,
+        selected &&
+          "ring-2 ring-primary/70 ring-offset-2 ring-offset-background",
         isDisabled && "opacity-50"
       )}
       data-testid={`action-node-${id}`}
       handles={{ target: true, source: true }}
       status={status}
     >
+      <VisualLevelDecor visualLevel={visualLevel} />
+
       {/* Disabled badge in top left */}
       {isDisabled && (
         <div className="absolute top-2 left-2 rounded-full bg-gray-500/50 p-1">
@@ -463,29 +447,34 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
 
       {/* Visual hierarchy badge */}
       {visualBadge && (
-        <div className="-translate-x-1/2 absolute top-2 left-1/2 rounded-full border border-border/60 bg-background/90 px-2 py-0.5 font-medium text-[10px] text-muted-foreground">
+        <div
+          className={cn(
+            "-translate-x-1/2 absolute left-1/2 z-10 rounded-full border px-2 py-0.5 font-semibold text-[10px]",
+            visualStyle.badgeClassName
+          )}
+        >
           {visualBadge}
         </div>
       )}
-      {data.visualLevel === "L1" && (
-        <div className="absolute inset-x-0 top-0 h-8 rounded-t-2xl bg-indigo-500/20" />
-      )}
-      {data.visualLevel === "L2" && (
-        <div className="absolute inset-x-0 top-0 h-1 rounded-t-2xl bg-blue-500/60" />
-      )}
 
-      <div className="flex flex-col items-center justify-center gap-3 p-6">
-        {hasGeneratedImage ? (
-          <GeneratedImageThumbnail
-            base64={(nodeLog.output as { base64: string }).base64}
-          />
-        ) : (
-          getProviderLogo(actionType)
+      <div
+        className={cn(
+          "relative z-10 flex flex-col items-center justify-center",
+          visualStyle.contentClassName
         )}
-        <div className="flex flex-col items-center gap-1 text-center">
-          <NodeTitle className="text-base">{displayTitle}</NodeTitle>
+      >
+        {nodeIcon}
+        <div
+          className={cn(
+            "-translate-x-1/2 absolute top-[calc(100%+0.5rem)] left-1/2 flex flex-col items-center gap-0.5 text-center",
+            visualStyle.captionClassName
+          )}
+        >
+          <NodeTitle className="max-w-full truncate text-sm leading-tight">
+            {displayTitle}
+          </NodeTitle>
           {displayDescription && (
-            <NodeDescription className="text-xs">
+            <NodeDescription className="max-w-full truncate text-[11px] leading-tight">
               {displayDescription}
             </NodeDescription>
           )}

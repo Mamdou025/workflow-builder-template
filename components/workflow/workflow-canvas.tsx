@@ -537,11 +537,17 @@ export function WorkflowCanvas() {
         <WorkflowToolbar workflowId={currentWorkflowId ?? undefined} />
       </div>
 
-      {/* Visual hierarchy legend */}
-      <div className="pointer-events-none absolute top-16 right-4 z-20 rounded-lg border bg-background/90 px-3 py-2 shadow-sm backdrop-blur">
-        <div className="text-[10px] text-muted-foreground">L1 = Stage</div>
-        <div className="text-[10px] text-muted-foreground">L2 = Step</div>
-        <div className="text-[10px] text-muted-foreground">L3 = Source</div>
+      {/* Fiscal workflow vocabulary legend */}
+      <div className="pointer-events-none absolute top-16 right-4 z-20 max-w-[260px] rounded-lg border bg-background/90 px-3 py-2 shadow-sm backdrop-blur">
+        <div className="font-medium text-[10px] text-foreground uppercase">
+          Fiscal Flow
+        </div>
+        <div className="text-[10px] text-muted-foreground">
+          Source -&gt; Logic -&gt; Review / Validation
+        </div>
+        <div className="text-[10px] text-muted-foreground">
+          Protected -&gt; Output
+        </div>
       </div>
 
       {/* React Flow Canvas */}

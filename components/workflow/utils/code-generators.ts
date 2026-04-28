@@ -28,6 +28,28 @@ const FALLBACK_UNKNOWN_CODE = `async function unknownStep(input: Record<string, 
   return input;
 }`;
 
+function generateFiscalBlockCode(config: NodeConfig | undefined): string {
+  const stage = (config?.fiscalStage as string) || "logic";
+  const outputKey = (config?.outputs as string) || `${stage}Output`;
+  const rulebookRef =
+    (config?.rulebookRef as string) ||
+    "Local prototype block with mock data only.";
+
+  return `async function fiscal${stage.charAt(0).toUpperCase()}${stage.slice(1)}Block(input: Record<string, unknown>) {
+  "use step";
+
+  return {
+    success: true,
+    data: {
+      stage: ${JSON.stringify(stage)},
+      outputKey: ${JSON.stringify(outputKey)},
+      rulebookRef: ${JSON.stringify(rulebookRef)},
+      mockOnly: true
+    }
+  };
+}`;
+}
+
 type NodeConfig = Record<string, unknown>;
 
 function generateTriggerCode(config: NodeConfig | undefined): string {
@@ -98,10 +120,16 @@ export const generateNodeCode = (node: {
   };
 }): string => {
   if (node.data.type === "trigger") {
+    if (node.data.config?.fiscalStage) {
+      return generateFiscalBlockCode(node.data.config);
+    }
     return generateTriggerCode(node.data.config);
   }
 
   if (node.data.type === "action") {
+    if (node.data.config?.fiscalStage && !node.data.config?.actionType) {
+      return generateFiscalBlockCode(node.data.config);
+    }
     return generateActionCode(node.data.config?.actionType as string);
   }
 

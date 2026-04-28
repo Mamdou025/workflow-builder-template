@@ -24,6 +24,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
 import { integrationsAtom } from "@/lib/integrations-store";
+import {
+  clearLocalRunRecords,
+  type FiscalStage,
+  getFiscalPreset,
+  getFiscalVisualForStage,
+  isLocalWorkflowId,
+  saveLocalWorkflowSnapshot,
+} from "@/lib/local-fiscal-workflow";
 import type { IntegrationType } from "@/lib/types/integration";
 import { generateWorkflowCode } from "@/lib/workflow-codegen";
 import {
@@ -46,6 +54,7 @@ import {
 import { findActionById } from "@/plugins";
 import { ActionConfig } from "../workflow/config/action-config";
 import { ActionGrid } from "../workflow/config/action-grid";
+import { FiscalBlockConfig } from "../workflow/config/fiscal-block-config";
 import { TriggerConfig } from "../workflow/config/trigger-config";
 import { generateNodeCode } from "../workflow/utils/code-generators";
 import { WorkflowRuns } from "../workflow/workflow-runs";
@@ -64,6 +73,10 @@ const WORD_SPLIT_REGEX = /\s+/;
 function getCodeFilename(node: {
   data: { type: string; config?: Record<string, unknown> };
 }): string {
+  if (node.data.config?.fiscalStage) {
+    return `blocks/${node.data.config.fiscalStage}.ts`;
+  }
+
   if (node.data.type === "trigger") {
     const triggerType = node.data.config?.triggerType as string;
     if (triggerType === "Schedule") {
@@ -171,6 +184,57 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
     [selectedNode, updateNodeData]
   );
 
+  const handleApplyVisualPreset = useCallback(
+    (presetId: string) => {
+      if (!selectedNode || selectedNode.data.type !== "action") {
+        return;
+      }
+
+      const preset = getFiscalPreset(presetId);
+      if (!preset) {
+        return;
+      }
+
+      const configWithoutActionType = Object.fromEntries(
+        Object.entries(selectedNode.data.config ?? {}).filter(
+          ([key]) => key !== "actionType" && key !== "integrationId"
+        )
+      );
+
+      updateNodeData({
+        id: selectedNode.id,
+        data: {
+          label:
+            selectedNode.data.label && selectedNode.data.label.trim().length > 0
+              ? selectedNode.data.label
+              : preset.label,
+          description:
+            selectedNode.data.description &&
+            selectedNode.data.description.trim().length > 0
+              ? selectedNode.data.description
+              : preset.description,
+          visualLevel: preset.visualLevel,
+          visualRole: preset.visualRole,
+          config: { ...configWithoutActionType, ...preset.config },
+        },
+      });
+    },
+    [selectedNode, updateNodeData]
+  );
+
+  const handleUpdateFiscalStage = useCallback(
+    (stage: FiscalStage) => {
+      if (!selectedNode) {
+        return;
+      }
+      updateNodeData({
+        id: selectedNode.id,
+        data: getFiscalVisualForStage(stage),
+      });
+    },
+    [selectedNode, updateNodeData]
+  );
+
   const handleUpdateLabel = useCallback(
     (label: string) => {
       if (!selectedNode) {
@@ -233,6 +297,36 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
     }
   };
 
+  const refreshRunsIfAvailable = async () => {
+    if (refreshRunsRef.current) {
+      await refreshRunsRef.current();
+    }
+  };
+
+  const confirmDeleteAllRuns = async () => {
+    if (!currentWorkflowId) {
+      return;
+    }
+
+    if (isLocalWorkflowId(currentWorkflowId)) {
+      clearLocalRunRecords();
+      clearNodeStatuses();
+      await refreshRunsIfAvailable();
+      toast.success("All local runs deleted");
+      return;
+    }
+
+    try {
+      await api.workflow.deleteExecutions(currentWorkflowId);
+      clearNodeStatuses();
+      await refreshRunsIfAvailable();
+      toast.success("All runs deleted");
+    } catch (error) {
+      console.error("Failed to delete runs:", error);
+      toast.error("Failed to delete runs");
+    }
+  };
+
   const handleDeleteAllRuns = () => {
     push(ConfirmOverlay, {
       title: "Delete All Runs",
@@ -240,31 +334,18 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
         "Are you sure you want to delete all workflow runs? This action cannot be undone.",
       confirmLabel: "Delete",
       confirmVariant: "destructive" as const,
-      onConfirm: async () => {
-        if (!currentWorkflowId) {
-          return;
-        }
-        try {
-          await api.workflow.deleteExecutions(currentWorkflowId);
-          clearNodeStatuses();
-          if (refreshRunsRef.current) {
-            await refreshRunsRef.current();
-          }
-          toast.success("All runs deleted");
-        } catch (error) {
-          console.error("Failed to delete runs:", error);
-          toast.error("Failed to delete runs");
-        }
-      },
+      onConfirm: confirmDeleteAllRuns,
     });
   };
 
   // Determine which tabs to show (only for node view)
-  const showCodeTab =
+  const showCodeTab = Boolean(
     selectedNode &&
-    (selectedNode.data.type !== "trigger" ||
-      (selectedNode.data.config?.triggerType as string) !== "Manual") &&
-    selectedNode.data.config?.actionType !== "Condition";
+      (selectedNode.data.type !== "trigger" ||
+        (selectedNode.data.config?.triggerType as string) !== "Manual" ||
+        selectedNode.data.config?.fiscalStage) &&
+      selectedNode.data.config?.actionType !== "Condition"
+  );
 
   // Get current tab title
   const getTabTitle = () => {
@@ -303,6 +384,11 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
   const handleUpdateWorkflowName = async (newName: string) => {
     setCurrentWorkflowName(newName);
 
+    if (isLocalWorkflowId(currentWorkflowId)) {
+      saveLocalWorkflowSnapshot({ name: newName, nodes, edges });
+      return;
+    }
+
     if (currentWorkflowId) {
       try {
         await api.workflow.update(currentWorkflowId, { name: newName });
@@ -322,6 +408,15 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
       confirmVariant: "destructive" as const,
       destructive: true,
       onConfirm: () => {
+        if (isLocalWorkflowId(currentWorkflowId)) {
+          clearWorkflow();
+          saveLocalWorkflowSnapshot({
+            name: currentWorkflowName,
+            nodes: [],
+            edges: [],
+          });
+          return;
+        }
         clearWorkflow();
       },
     });
@@ -337,6 +432,16 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
       destructive: true,
       onConfirm: async () => {
         if (!currentWorkflowId) {
+          return;
+        }
+        if (isLocalWorkflowId(currentWorkflowId)) {
+          clearWorkflow();
+          saveLocalWorkflowSnapshot({
+            name: currentWorkflowName,
+            nodes: [],
+            edges: [],
+          });
+          toast.success("Local workflow cleared");
           return;
         }
         try {
@@ -607,11 +712,20 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
             {/* Action selection */}
             {selectedNode.data.type === "action" &&
               !selectedNode.data.config?.actionType &&
+              !selectedNode.data.visualLevel &&
               isOwner && (
                 <ActionGrid
                   disabled={isGenerating}
                   isNewlyCreated={selectedNode?.id === newlyCreatedNodeId}
                   onSelectAction={(actionType) => {
+                    if (actionType.startsWith("preset:")) {
+                      handleApplyVisualPreset(actionType);
+                      if (selectedNode?.id === newlyCreatedNodeId) {
+                        setNewlyCreatedNodeId(null);
+                      }
+                      return;
+                    }
+
                     handleUpdateConfig("actionType", actionType);
                     if (selectedNode?.id === newlyCreatedNodeId) {
                       setNewlyCreatedNodeId(null);
@@ -639,9 +753,22 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
                 />
               )}
 
+            {(selectedNode.data.config?.fiscalStage ||
+              (!selectedNode.data.config?.actionType &&
+                selectedNode.data.visualRole)) && (
+              <FiscalBlockConfig
+                config={selectedNode.data.config || {}}
+                disabled={isGenerating || !isOwner}
+                onUpdateConfig={handleUpdateConfig}
+                onUpdateStage={handleUpdateFiscalStage}
+                visualRole={selectedNode.data.visualRole}
+              />
+            )}
+
             {/* Label & Description */}
             {(selectedNode.data.type !== "action" ||
-              selectedNode.data.config?.actionType !== undefined) && (
+              selectedNode.data.config?.actionType !== undefined ||
+              selectedNode.data.visualLevel) && (
               <>
                 <div className="space-y-2">
                   <Label htmlFor="label">Label</Label>

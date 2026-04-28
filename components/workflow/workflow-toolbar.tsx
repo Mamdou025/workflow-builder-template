@@ -13,10 +13,12 @@ import {
   Play,
   Plus,
   Redo2,
+  RotateCcw,
   Save,
   Settings2,
   Trash2,
   Undo2,
+  Upload,
 } from "lucide-react";
 import { nanoid } from "nanoid";
 import { useRouter } from "next/navigation";
@@ -34,6 +36,14 @@ import {
 import { api } from "@/lib/api-client";
 import { authClient, useSession } from "@/lib/auth-client";
 import { integrationsAtom } from "@/lib/integrations-store";
+import {
+  createFapiSampleWorkflow,
+  createLocalRunRecord,
+  isLocalWorkflowId,
+  parseLocalWorkflowJson,
+  saveLocalRunRecord,
+  saveLocalWorkflowSnapshot,
+} from "@/lib/local-fiscal-workflow";
 import type { IntegrationType } from "@/lib/types/integration";
 import {
   addNodeAtom,
@@ -46,6 +56,7 @@ import {
   deleteEdgeAtom,
   deleteNodeAtom,
   edgesAtom,
+  executionLogsAtom,
   hasUnsavedChangesAtom,
   isExecutingAtom,
   isGeneratingAtom,
@@ -97,6 +108,23 @@ function updateNodesStatus(
   for (const node of nodes) {
     updateNodeData({ id: node.id, data: { status } });
   }
+}
+
+function createExecutionLogsMap(
+  logs: ReturnType<typeof createLocalRunRecord>["logs"]
+) {
+  return Object.fromEntries(
+    logs.map((log) => [
+      log.nodeId,
+      {
+        nodeId: log.nodeId,
+        nodeName: log.nodeName,
+        nodeType: log.nodeType,
+        status: log.status,
+        output: log.output,
+      },
+    ])
+  );
 }
 
 type MissingIntegrationInfo = {
@@ -478,6 +506,7 @@ async function executeTestWorkflow({
 // Hook for workflow handlers
 type WorkflowHandlerParams = {
   currentWorkflowId: string | null;
+  workflowName: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   updateNodeData: (update: {
@@ -493,11 +522,24 @@ type WorkflowHandlerParams = {
   setEdges: (edges: WorkflowEdge[]) => void;
   setSelectedNodeId: (id: string | null) => void;
   setSelectedExecutionId: (id: string | null) => void;
+  setExecutionLogs: (
+    logs: Record<
+      string,
+      {
+        nodeId: string;
+        nodeName: string;
+        nodeType: string;
+        status: "pending" | "running" | "success" | "error";
+        output?: unknown;
+      }
+    >
+  ) => void;
   userIntegrations: Array<{ id: string; type: IntegrationType }>;
 };
 
 function useWorkflowHandlers({
   currentWorkflowId,
+  workflowName,
   nodes,
   edges,
   updateNodeData,
@@ -510,6 +552,7 @@ function useWorkflowHandlers({
   setEdges,
   setSelectedNodeId,
   setSelectedExecutionId,
+  setExecutionLogs,
   userIntegrations,
 }: WorkflowHandlerParams) {
   const { open: openOverlay } = useOverlay();
@@ -532,6 +575,13 @@ function useWorkflowHandlers({
 
     setIsSaving(true);
     try {
+      if (isLocalWorkflowId(currentWorkflowId)) {
+        saveLocalWorkflowSnapshot({ name: workflowName, nodes, edges });
+        setHasUnsavedChanges(false);
+        toast.success("Saved to local storage");
+        return;
+      }
+
       await api.workflow.update(currentWorkflowId, { nodes, edges });
       setHasUnsavedChanges(false);
     } catch (error) {
@@ -557,6 +607,18 @@ function useWorkflowHandlers({
     setSelectedNodeId(null);
 
     setIsExecuting(true);
+
+    if (isLocalWorkflowId(currentWorkflowId)) {
+      const runRecord = createLocalRunRecord(nodes, edges);
+      saveLocalRunRecord(runRecord);
+      updateNodesStatus(nodes, updateNodeData, "success");
+      setSelectedExecutionId(runRecord.execution.id);
+      setExecutionLogs(createExecutionLogsMap(runRecord.logs));
+      setIsExecuting(false);
+      toast.success("Mock fiscal run completed");
+      return;
+    }
+
     await executeTestWorkflow({
       workflowId: currentWorkflowId,
       nodes,
@@ -587,6 +649,11 @@ function useWorkflowHandlers({
   const handleExecute = async () => {
     // Guard against concurrent executions
     if (isExecuting) {
+      return;
+    }
+
+    if (isLocalWorkflowId(currentWorkflowId)) {
+      await executeWorkflow();
       return;
     }
 
@@ -631,6 +698,7 @@ function useWorkflowState() {
   const clearWorkflow = useSetAtom(clearWorkflowAtom);
   const updateNodeData = useSetAtom(updateNodeDataAtom);
   const [currentWorkflowId] = useAtom(currentWorkflowIdAtom);
+  const isLocal = isLocalWorkflowId(currentWorkflowId);
   const [workflowName, setCurrentWorkflowName] = useAtom(
     currentWorkflowNameAtom
   );
@@ -652,6 +720,7 @@ function useWorkflowState() {
   const setActiveTab = useSetAtom(propertiesPanelActiveTabAtom);
   const setSelectedNodeId = useSetAtom(selectedNodeAtom);
   const setSelectedExecutionId = useSetAtom(selectedExecutionIdAtom);
+  const setExecutionLogs = useSetAtom(executionLogsAtom);
   const userIntegrations = useAtomValue(integrationsAtom);
   const [triggerExecute, setTriggerExecute] = useAtom(triggerExecuteAtom);
 
@@ -667,6 +736,10 @@ function useWorkflowState() {
 
   // Load all workflows on mount
   useEffect(() => {
+    if (!(currentWorkflowId && !isLocal)) {
+      return;
+    }
+
     const loadAllWorkflows = async () => {
       try {
         const workflows = await api.workflow.getAll();
@@ -676,7 +749,7 @@ function useWorkflowState() {
       }
     };
     loadAllWorkflows();
-  }, []);
+  }, [currentWorkflowId, isLocal]);
 
   return {
     nodes,
@@ -687,6 +760,7 @@ function useWorkflowState() {
     clearWorkflow,
     updateNodeData,
     currentWorkflowId,
+    isLocal,
     workflowName,
     setCurrentWorkflowName,
     workflowVisibility,
@@ -714,6 +788,7 @@ function useWorkflowState() {
     setEdges,
     setSelectedNodeId,
     setSelectedExecutionId,
+    setExecutionLogs,
     userIntegrations,
     triggerExecute,
     setTriggerExecute,
@@ -725,7 +800,9 @@ function useWorkflowActions(state: ReturnType<typeof useWorkflowState>) {
   const { open: openOverlay } = useOverlay();
   const {
     currentWorkflowId,
+    isLocal,
     workflowName,
+    setCurrentWorkflowName,
     nodes,
     edges,
     updateNodeData,
@@ -743,6 +820,7 @@ function useWorkflowActions(state: ReturnType<typeof useWorkflowState>) {
     setEdges,
     setSelectedNodeId,
     setSelectedExecutionId,
+    setExecutionLogs,
     userIntegrations,
     triggerExecute,
     setTriggerExecute,
@@ -752,6 +830,7 @@ function useWorkflowActions(state: ReturnType<typeof useWorkflowState>) {
 
   const { handleSave, handleExecute } = useWorkflowHandlers({
     currentWorkflowId,
+    workflowName,
     nodes,
     edges,
     updateNodeData,
@@ -764,6 +843,7 @@ function useWorkflowActions(state: ReturnType<typeof useWorkflowState>) {
     setEdges,
     setSelectedNodeId,
     setSelectedExecutionId,
+    setExecutionLogs,
     userIntegrations,
   });
 
@@ -784,6 +864,20 @@ function useWorkflowActions(state: ReturnType<typeof useWorkflowState>) {
       confirmVariant: "destructive" as const,
       destructive: true,
       onConfirm: () => {
+        if (isLocal) {
+          setNodes([]);
+          setEdges([]);
+          setSelectedNodeId(null);
+          setSelectedExecutionId(null);
+          setExecutionLogs({});
+          saveLocalWorkflowSnapshot({
+            name: workflowName,
+            nodes: [],
+            edges: [],
+          });
+          setHasUnsavedChanges(false);
+          return;
+        }
         clearWorkflow();
       },
     });
@@ -800,6 +894,23 @@ function useWorkflowActions(state: ReturnType<typeof useWorkflowState>) {
         if (!currentWorkflowId) {
           return;
         }
+        if (isLocal) {
+          const sample = createFapiSampleWorkflow();
+          setNodes(sample.nodes);
+          setEdges(sample.edges);
+          setCurrentWorkflowName(sample.name);
+          setSelectedNodeId(sample.nodes[0]?.id ?? null);
+          setSelectedExecutionId(null);
+          setExecutionLogs({});
+          saveLocalWorkflowSnapshot({
+            name: sample.name,
+            nodes: sample.nodes,
+            edges: sample.edges,
+          });
+          setHasUnsavedChanges(false);
+          toast.success("Local sample restored");
+          return;
+        }
         try {
           await api.workflow.delete(currentWorkflowId);
           toast.success("Workflow deleted successfully");
@@ -812,6 +923,57 @@ function useWorkflowActions(state: ReturnType<typeof useWorkflowState>) {
     });
   };
 
+  const downloadBlob = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadLocalWorkflow = () => {
+    const snapshot = saveLocalWorkflowSnapshot({
+      name: workflowName,
+      nodes,
+      edges,
+    });
+    const blob = new Blob([JSON.stringify(snapshot, null, 2)], {
+      type: "application/json",
+    });
+    downloadBlob(blob, "fiscal-workflow-studio.json");
+    toast.success("Workflow JSON exported");
+  };
+
+  const downloadWorkflowCode = async (workflowId: string) => {
+    toast.info("Preparing workflow files for download...");
+    const result = await api.workflow.download(workflowId);
+
+    if (!result.success) {
+      throw new Error(result.error || "Failed to prepare download");
+    }
+
+    if (!result.files) {
+      throw new Error("No files to download");
+    }
+
+    const JSZip = (await import("jszip")).default;
+    const zip = new JSZip();
+
+    for (const [path, content] of Object.entries(result.files)) {
+      zip.file(path, content);
+    }
+
+    const blob = await zip.generateAsync({ type: "blob" });
+    downloadBlob(
+      blob,
+      `${workflowName.toLowerCase().replace(/[^a-z0-9]/g, "-")}-workflow.zip`
+    );
+    toast.success("Workflow downloaded successfully!");
+  };
+
   const handleDownload = async () => {
     if (!currentWorkflowId) {
       toast.error("Please save the workflow before downloading");
@@ -819,42 +981,13 @@ function useWorkflowActions(state: ReturnType<typeof useWorkflowState>) {
     }
 
     setIsDownloading(true);
-    toast.info("Preparing workflow files for download...");
 
     try {
-      const result = await api.workflow.download(currentWorkflowId);
-
-      if (!result.success) {
-        throw new Error(result.error || "Failed to prepare download");
+      if (isLocal) {
+        downloadLocalWorkflow();
+      } else {
+        await downloadWorkflowCode(currentWorkflowId);
       }
-
-      if (!result.files) {
-        throw new Error("No files to download");
-      }
-
-      // Import JSZip dynamically
-      const JSZip = (await import("jszip")).default;
-      const zip = new JSZip();
-
-      // Add all files to the zip
-      for (const [path, content] of Object.entries(result.files)) {
-        zip.file(path, content);
-      }
-
-      // Generate the zip file
-      const blob = await zip.generateAsync({ type: "blob" });
-
-      // Create download link
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${workflowName.toLowerCase().replace(/[^a-z0-9]/g, "-")}-workflow.zip`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-
-      toast.success("Workflow downloaded successfully!");
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Failed to download workflow"
@@ -865,6 +998,10 @@ function useWorkflowActions(state: ReturnType<typeof useWorkflowState>) {
   };
 
   const loadWorkflows = async () => {
+    if (isLocal) {
+      return;
+    }
+
     try {
       const workflows = await api.workflow.getAll();
       setAllWorkflows(workflows);
@@ -874,6 +1011,10 @@ function useWorkflowActions(state: ReturnType<typeof useWorkflowState>) {
   };
 
   const handleToggleVisibility = async (newVisibility: WorkflowVisibility) => {
+    if (isLocal) {
+      return;
+    }
+
     if (!currentWorkflowId) {
       return;
     }
@@ -911,6 +1052,10 @@ function useWorkflowActions(state: ReturnType<typeof useWorkflowState>) {
   };
 
   const handleDuplicate = async () => {
+    if (isLocal) {
+      return;
+    }
+
     if (!currentWorkflowId) {
       return;
     }
@@ -944,6 +1089,49 @@ function useWorkflowActions(state: ReturnType<typeof useWorkflowState>) {
     loadWorkflows,
     handleToggleVisibility,
     handleDuplicate,
+    handleImportWorkflow: async (file: File) => {
+      const text = await file.text();
+      const snapshot = parseLocalWorkflowJson(text);
+      setNodes(snapshot.nodes);
+      setEdges(snapshot.edges);
+      setCurrentWorkflowName(snapshot.name);
+      setSelectedNodeId(snapshot.nodes[0]?.id ?? null);
+      setSelectedExecutionId(null);
+      setExecutionLogs({});
+      saveLocalWorkflowSnapshot({
+        name: snapshot.name,
+        nodes: snapshot.nodes,
+        edges: snapshot.edges,
+      });
+      setHasUnsavedChanges(false);
+      toast.success("Workflow JSON imported");
+    },
+    handleResetSample: () => {
+      openOverlay(ConfirmOverlay, {
+        title: "Reset Sample",
+        message:
+          "Reset the local studio to the FAPI sample workflow? Current local nodes and connections will be replaced.",
+        confirmLabel: "Reset Sample",
+        confirmVariant: "destructive" as const,
+        destructive: true,
+        onConfirm: () => {
+          const sample = createFapiSampleWorkflow();
+          setNodes(sample.nodes);
+          setEdges(sample.edges);
+          setCurrentWorkflowName(sample.name);
+          setSelectedNodeId(sample.nodes[0]?.id ?? null);
+          setSelectedExecutionId(null);
+          setExecutionLogs({});
+          saveLocalWorkflowSnapshot({
+            name: sample.name,
+            nodes: sample.nodes,
+            edges: sample.edges,
+          });
+          setHasUnsavedChanges(false);
+          toast.success("FAPI sample restored");
+        },
+      });
+    },
   };
 }
 
@@ -1171,16 +1359,20 @@ function ToolbarActions({
       <ButtonGroup className="flex lg:hidden" orientation="vertical">
         <SaveButton handleSave={actions.handleSave} state={state} />
         <DownloadButton actions={actions} state={state} />
+        {state.isLocal && <ImportButton actions={actions} state={state} />}
+        {state.isLocal && <ResetSampleButton actions={actions} state={state} />}
       </ButtonGroup>
 
       {/* Save/Download - Desktop Horizontal */}
       <ButtonGroup className="hidden lg:flex" orientation="horizontal">
         <SaveButton handleSave={actions.handleSave} state={state} />
         <DownloadButton actions={actions} state={state} />
+        {state.isLocal && <ImportButton actions={actions} state={state} />}
+        {state.isLocal && <ResetSampleButton actions={actions} state={state} />}
       </ButtonGroup>
 
       {/* Visibility Toggle */}
-      <VisibilityButton actions={actions} state={state} />
+      {!state.isLocal && <VisibilityButton actions={actions} state={state} />}
 
       <RunButtonGroup actions={actions} state={state} />
     </>
@@ -1195,6 +1387,17 @@ function SaveButton({
   state: ReturnType<typeof useWorkflowState>;
   handleSave: () => Promise<void>;
 }) {
+  if (state.isLocal) {
+    return (
+      <div className="flex flex-col gap-1">
+        <div className="flex h-9 max-w-[220px] items-center gap-2 overflow-hidden rounded-md border bg-secondary px-3 text-secondary-foreground sm:max-w-none">
+          <WorkflowIcon className="size-4 shrink-0" />
+          <p className="truncate font-medium text-sm">{state.workflowName}</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <Button
       className="relative border hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5 disabled:[&>svg]:text-muted-foreground"
@@ -1227,8 +1430,20 @@ function DownloadButton({
   actions: ReturnType<typeof useWorkflowActions>;
 }) {
   const { open: openOverlay } = useOverlay();
+  let title = "Export workflow as code";
+  if (state.isLocal) {
+    title = "Export workflow JSON";
+  }
+  if (state.isDownloading) {
+    title = "Preparing download...";
+  }
 
   const handleClick = () => {
+    if (state.isLocal) {
+      actions.handleDownload();
+      return;
+    }
+
     openOverlay(ExportWorkflowOverlay, {
       onExport: actions.handleDownload,
       isDownloading: state.isDownloading,
@@ -1246,11 +1461,7 @@ function DownloadButton({
       }
       onClick={handleClick}
       size="icon"
-      title={
-        state.isDownloading
-          ? "Preparing download..."
-          : "Export workflow as code"
-      }
+      title={title}
       variant="secondary"
     >
       {state.isDownloading ? (
@@ -1258,6 +1469,71 @@ function DownloadButton({
       ) : (
         <Download className="size-4" />
       )}
+    </Button>
+  );
+}
+
+function ImportButton({
+  state,
+  actions,
+}: {
+  state: ReturnType<typeof useWorkflowState>;
+  actions: ReturnType<typeof useWorkflowActions>;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  return (
+    <>
+      <Button
+        className="border hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5 disabled:[&>svg]:text-muted-foreground"
+        disabled={state.isGenerating}
+        onClick={() => inputRef.current?.click()}
+        size="icon"
+        title="Import workflow JSON"
+        variant="secondary"
+      >
+        <Upload className="size-4" />
+      </Button>
+      <input
+        accept="application/json,.json"
+        className="hidden"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) {
+            actions.handleImportWorkflow(file).catch((error) => {
+              toast.error(
+                error instanceof Error
+                  ? error.message
+                  : "Failed to import workflow JSON"
+              );
+            });
+          }
+          event.target.value = "";
+        }}
+        ref={inputRef}
+        type="file"
+      />
+    </>
+  );
+}
+
+function ResetSampleButton({
+  state,
+  actions,
+}: {
+  state: ReturnType<typeof useWorkflowState>;
+  actions: ReturnType<typeof useWorkflowActions>;
+}) {
+  return (
+    <Button
+      className="border hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5 disabled:[&>svg]:text-muted-foreground"
+      disabled={state.isGenerating}
+      onClick={actions.handleResetSample}
+      size="icon"
+      title="Reset FAPI sample"
+      variant="secondary"
+    >
+      <RotateCcw className="size-4" />
     </Button>
   );
 }
@@ -1475,13 +1751,13 @@ export const WorkflowToolbar = ({ workflowId }: WorkflowToolbarProps) => {
                 <DeployButton />
               </>
             )}
-            {workflowId && !state.isOwner && (
+            {workflowId && !state.isOwner && !state.isLocal && (
               <DuplicateButton
                 isDuplicating={state.isDuplicating}
                 onDuplicate={actions.handleDuplicate}
               />
             )}
-            <UserMenu />
+            {!state.isLocal && <UserMenu />}
           </div>
         </div>
       </div>

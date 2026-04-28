@@ -33,6 +33,14 @@ import {
 } from "@/components/ui/select";
 import { api } from "@/lib/api-client";
 import { integrationsAtom } from "@/lib/integrations-store";
+import {
+  clearLocalRunRecords,
+  type FiscalStage,
+  getFiscalPreset,
+  getFiscalVisualForStage,
+  isLocalWorkflowId,
+  saveLocalWorkflowSnapshot,
+} from "@/lib/local-fiscal-workflow";
 import type { IntegrationType } from "@/lib/types/integration";
 import { generateWorkflowCode } from "@/lib/workflow-codegen";
 import {
@@ -59,6 +67,7 @@ import { findActionById } from "@/plugins";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { ActionConfig } from "./config/action-config";
 import { ActionGrid } from "./config/action-grid";
+import { FiscalBlockConfig } from "./config/fiscal-block-config";
 
 import { TriggerConfig } from "./config/trigger-config";
 import { generateNodeCode } from "./utils/code-generators";
@@ -79,8 +88,12 @@ const VISUAL_ROLES = [
   "step",
   "calculation",
   "review",
+  "validation",
   "source",
   "evidence",
+  "logic",
+  "protected",
+  "output",
 ] as const;
 
 // Multi-selection panel component
@@ -338,6 +351,14 @@ export const PanelInner = () => {
       return;
     }
 
+    if (isLocalWorkflowId(currentWorkflowId)) {
+      clearLocalRunRecords();
+      clearNodeStatuses();
+      setShowDeleteRunsAlert(false);
+      toast.success("Local runs cleared");
+      return;
+    }
+
     try {
       await api.workflow.deleteExecutions(currentWorkflowId);
       clearNodeStatuses();
@@ -466,54 +487,7 @@ export const PanelInner = () => {
       return;
     }
 
-    const presetMap: Record<
-      string,
-      {
-        label: string;
-        description: string;
-        visualLevel: "L1" | "L2" | "L3";
-        visualRole:
-          | "stage"
-          | "step"
-          | "calculation"
-          | "review"
-          | "source"
-          | "evidence";
-      }
-    > = {
-      "preset:stage-layer": {
-        label: "New Stage",
-        description: "High-level stage",
-        visualLevel: "L1",
-        visualRole: "stage",
-      },
-      "preset:step-block": {
-        label: "New Step",
-        description: "Operational step",
-        visualLevel: "L2",
-        visualRole: "step",
-      },
-      "preset:calculation-step": {
-        label: "New Calculation Step",
-        description: "Calculation step",
-        visualLevel: "L2",
-        visualRole: "calculation",
-      },
-      "preset:review-step": {
-        label: "Review Step",
-        description: "Review step",
-        visualLevel: "L2",
-        visualRole: "review",
-      },
-      "preset:source-evidence": {
-        label: "New Source",
-        description: "Source evidence placeholder",
-        visualLevel: "L3",
-        visualRole: "source",
-      },
-    };
-
-    const preset = presetMap[presetId];
+    const preset = getFiscalPreset(presetId);
     if (!preset) {
       return;
     }
@@ -538,7 +512,7 @@ export const PanelInner = () => {
             : preset.description,
         visualLevel: preset.visualLevel,
         visualRole: preset.visualRole,
-        config: configWithoutActionType,
+        config: { ...configWithoutActionType, ...preset.config },
       },
     });
   };
@@ -567,14 +541,33 @@ export const PanelInner = () => {
           | "step"
           | "calculation"
           | "review"
+          | "validation"
           | "source"
-          | "evidence",
+          | "evidence"
+          | "logic"
+          | "protected"
+          | "output",
       },
+    });
+  };
+
+  const handleUpdateFiscalStage = (stage: FiscalStage) => {
+    if (!selectedNode) {
+      return;
+    }
+    updateNodeData({
+      id: selectedNode.id,
+      data: getFiscalVisualForStage(stage),
     });
   };
 
   const handleUpdateWorkspaceName = async (newName: string) => {
     setCurrentWorkflowName(newName);
+
+    if (isLocalWorkflowId(currentWorkflowId)) {
+      saveLocalWorkflowSnapshot({ name: newName, nodes, edges });
+      return;
+    }
 
     // Save to database if workflow exists
     if (currentWorkflowId) {
@@ -750,7 +743,7 @@ export const PanelInner = () => {
                   </p>
                 </div>
               )}
-              {isOwner && (
+              {isOwner && !isLocalWorkflowId(currentWorkflowId) && (
                 <div className="flex items-center gap-2 pt-4">
                   <Button
                     className="text-muted-foreground"
@@ -879,6 +872,11 @@ export const PanelInner = () => {
     );
   }
 
+  const hasFiscalConfig = Boolean(
+    selectedNode.data.config?.fiscalStage ||
+      (!selectedNode.data.config?.actionType && selectedNode.data.visualRole)
+  );
+
   return (
     <>
       <Tabs
@@ -896,7 +894,8 @@ export const PanelInner = () => {
             Properties
           </TabsTrigger>
           {(selectedNode.data.type !== "trigger" ||
-            (selectedNode.data.config?.triggerType as string) !== "Manual") &&
+            (selectedNode.data.config?.triggerType as string) !== "Manual" ||
+            selectedNode.data.config?.fiscalStage) &&
           selectedNode.data.config?.actionType !== "Condition" ? (
             <TabsTrigger
               className="bg-transparent text-muted-foreground data-[state=active]:text-foreground data-[state=active]:shadow-none"
@@ -974,8 +973,7 @@ export const PanelInner = () => {
                 )}
 
               {selectedNode.data.type === "action" &&
-              (selectedNode.data.config?.actionType ||
-                selectedNode.data.visualLevel) ? (
+              selectedNode.data.config?.actionType ? (
                 <ActionConfig
                   config={selectedNode.data.config || {}}
                   disabled={isGenerating || !isOwner}
@@ -983,6 +981,16 @@ export const PanelInner = () => {
                   onUpdateConfig={handleUpdateConfig}
                 />
               ) : null}
+
+              {hasFiscalConfig && (
+                <FiscalBlockConfig
+                  config={selectedNode.data.config || {}}
+                  disabled={isGenerating || !isOwner}
+                  onUpdateConfig={handleUpdateConfig}
+                  onUpdateStage={handleUpdateFiscalStage}
+                  visualRole={selectedNode.data.visualRole}
+                />
+              )}
 
               {selectedNode.data.type !== "action" ||
               selectedNode.data.config?.actionType ||
@@ -1018,7 +1026,9 @@ export const PanelInner = () => {
                         <SelectContent>
                           {VISUAL_ROLES.map((role) => (
                             <SelectItem key={role} value={role}>
-                              {role.charAt(0).toUpperCase() + role.slice(1)}
+                              {role === "validation"
+                                ? "Review / Validation"
+                                : role.charAt(0).toUpperCase() + role.slice(1)}
                             </SelectItem>
                           ))}
                         </SelectContent>
@@ -1109,7 +1119,9 @@ export const PanelInner = () => {
             let filename = "";
             let language = "typescript";
 
-            if (selectedNode.data.type === "trigger") {
+            if (selectedNode.data.config?.fiscalStage) {
+              filename = `blocks/${selectedNode.data.config.fiscalStage}.ts`;
+            } else if (selectedNode.data.type === "trigger") {
               if (triggerType === "Schedule") {
                 filename = "vercel.json";
                 language = "json";

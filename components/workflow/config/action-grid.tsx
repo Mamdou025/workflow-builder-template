@@ -1,14 +1,21 @@
 "use client";
 
+import { useAtomValue } from "jotai";
 import {
+  Calculator,
   ChevronRight,
   Eye,
   EyeOff,
+  FileText,
   Grid3X3,
   List,
+  LockKeyhole,
   MoreHorizontal,
+  PackageCheck,
   Search,
   Settings,
+  ShieldCheck,
+  Upload,
   Zap,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -28,7 +35,12 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useIsTouch } from "@/hooks/use-touch";
+import {
+  FISCAL_STAGE_OPTIONS,
+  isLocalWorkflowId,
+} from "@/lib/local-fiscal-workflow";
 import { cn } from "@/lib/utils";
+import { currentWorkflowIdAtom } from "@/lib/workflow-store";
 import { getAllActions } from "@/plugins";
 
 type ActionType = {
@@ -39,38 +51,14 @@ type ActionType = {
   integration?: string;
 };
 
-const WORKFLOW_STRUCTURE_ACTIONS: ActionType[] = [
-  {
-    id: "preset:stage-layer",
-    label: "Stage / Layer",
-    description: "Create a high-level stage or section node",
-    category: "Workflow Structure",
-  },
-  {
-    id: "preset:step-block",
-    label: "Step / Block",
-    description: "Create a standard operational step node",
-    category: "Workflow Structure",
-  },
-  {
-    id: "preset:calculation-step",
-    label: "Calculation Step",
-    description: "Create a calculation-oriented operational node",
-    category: "Workflow Structure",
-  },
-  {
-    id: "preset:review-step",
-    label: "Review Step",
-    description: "Create a review-oriented operational node",
-    category: "Workflow Structure",
-  },
-  {
-    id: "preset:source-evidence",
-    label: "Source / Evidence",
-    description: "Create a source or evidence placeholder node",
-    category: "Workflow Structure",
-  },
-];
+const FISCAL_WORKFLOW_ACTIONS: ActionType[] = FISCAL_STAGE_OPTIONS.map(
+  (option) => ({
+    id: option.id,
+    label: option.label,
+    description: option.description,
+    category: "Fiscal Workflow",
+  })
+);
 
 // System actions that don't have plugins
 const SYSTEM_ACTIONS: ActionType[] = [
@@ -95,8 +83,12 @@ const SYSTEM_ACTIONS: ActionType[] = [
 ];
 
 // Combine System actions with plugin actions
-function useAllActions(): ActionType[] {
+function useAllActions(localMode: boolean): ActionType[] {
   return useMemo(() => {
+    if (localMode) {
+      return FISCAL_WORKFLOW_ACTIONS;
+    }
+
     const pluginActions = getAllActions();
 
     // Map plugin actions to ActionType format
@@ -109,11 +101,11 @@ function useAllActions(): ActionType[] {
     }));
 
     return [
-      ...WORKFLOW_STRUCTURE_ACTIONS,
+      ...FISCAL_WORKFLOW_ACTIONS,
       ...SYSTEM_ACTIONS,
       ...mappedPluginActions,
     ];
-  }, []);
+  }, [localMode]);
 }
 
 type ActionGridProps = {
@@ -141,6 +133,9 @@ function GroupIcon({
   if (group.category === "System") {
     return <Settings className="size-4" />;
   }
+  if (group.category === "Fiscal Workflow") {
+    return <PackageCheck className="size-4" />;
+  }
   return <Zap className="size-4" />;
 }
 
@@ -151,6 +146,21 @@ function ActionIcon({
   action: ActionType;
   className?: string;
 }) {
+  if (action.id === "preset:source") {
+    return <FileText className={cn(className, "text-sky-500")} />;
+  }
+  if (action.id === "preset:logic") {
+    return <Calculator className={cn(className, "text-emerald-500")} />;
+  }
+  if (action.id === "preset:review-validation") {
+    return <ShieldCheck className={cn(className, "text-amber-500")} />;
+  }
+  if (action.id === "preset:protected") {
+    return <LockKeyhole className={cn(className, "text-violet-500")} />;
+  }
+  if (action.id === "preset:output") {
+    return <Upload className={cn(className, "text-indigo-500")} />;
+  }
   if (action.integration) {
     return (
       <IntegrationIcon className={className} integration={action.integration} />
@@ -206,7 +216,8 @@ export function ActionGrid({
   );
   const [showHidden, setShowHidden] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>(getInitialViewMode);
-  const actions = useAllActions();
+  const currentWorkflowId = useAtomValue(currentWorkflowIdAtom);
+  const actions = useAllActions(isLocalWorkflowId(currentWorkflowId));
   const inputRef = useRef<HTMLInputElement>(null);
   const isTouch = useIsTouch();
 
@@ -273,10 +284,10 @@ export function ActionGrid({
 
     // Sort categories: System first, then alphabetically
     const sortedCategories = Object.keys(groups).sort((a, b) => {
-      if (a === "Workflow Structure") {
+      if (a === "Fiscal Workflow") {
         return -1;
       }
-      if (b === "Workflow Structure") {
+      if (b === "Fiscal Workflow") {
         return 1;
       }
       if (a === "System") {
@@ -477,7 +488,7 @@ export function ActionGrid({
                   group.actions.map((action) => (
                     <button
                       className={cn(
-                        "flex w-full items-center rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-muted",
+                        "flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-muted",
                         disabled && "pointer-events-none opacity-50"
                       )}
                       data-testid={`action-option-${action.id.toLowerCase().replace(/\s+/g, "-")}`}
@@ -486,6 +497,7 @@ export function ActionGrid({
                       onClick={() => onSelectAction(action.id)}
                       type="button"
                     >
+                      <ActionIcon action={action} className="size-4 shrink-0" />
                       <span className="min-w-0 flex-1 truncate">
                         <span className="font-medium">{action.label}</span>
                         {action.description && (

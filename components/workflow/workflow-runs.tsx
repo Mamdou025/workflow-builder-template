@@ -17,6 +17,11 @@ import type { JSX } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api-client";
 import {
+  isLocalWorkflowId,
+  type LocalRunRecord,
+  loadLocalRunRecords,
+} from "@/lib/local-fiscal-workflow";
+import {
   OUTPUT_DISPLAY_CONFIGS,
   type OutputDisplayConfig,
 } from "@/lib/output-display-configs";
@@ -123,6 +128,18 @@ function createExecutionLogsMap(logs: ExecutionLog[]): Record<
     };
   }
   return logsMap;
+}
+
+function mapLocalRunRecords(records: LocalRunRecord[]): {
+  executions: WorkflowExecution[];
+  logs: Record<string, ExecutionLog[]>;
+} {
+  return {
+    executions: records.map((record) => record.execution),
+    logs: Object.fromEntries(
+      records.map((record) => [record.execution.id, record.logs])
+    ),
+  };
 }
 
 // Helper to check if a string is a URL
@@ -545,6 +562,15 @@ export function WorkflowRuns({
         if (showLoading) {
           setLoading(true);
         }
+
+        if (isLocalWorkflowId(currentWorkflowId)) {
+          const local = mapLocalRunRecords(loadLocalRunRecords());
+          setExecutions(local.executions);
+          setLogs(local.logs);
+          setLoading(false);
+          return;
+        }
+
         const data = await api.workflow.getExecutions(currentWorkflowId);
         setExecutions(data as WorkflowExecution[]);
       } catch (error) {
@@ -610,6 +636,21 @@ export function WorkflowRuns({
   const loadExecutionLogs = useCallback(
     async (executionId: string) => {
       try {
+        if (isLocalWorkflowId(currentWorkflowId)) {
+          const record = loadLocalRunRecords().find(
+            (item) => item.execution.id === executionId
+          );
+          const mappedLogs = record?.logs || [];
+          setLogs((prev) => ({
+            ...prev,
+            [executionId]: mappedLogs,
+          }));
+          if (executionId === selectedExecutionId) {
+            setExecutionLogs(createExecutionLogsMap(mappedLogs));
+          }
+          return;
+        }
+
         const data = await api.workflow.getExecutionLogs(executionId);
         const mappedLogs = mapNodeLabels(data.logs, data.execution.workflow);
         setLogs((prev) => ({
@@ -626,7 +667,7 @@ export function WorkflowRuns({
         setLogs((prev) => ({ ...prev, [executionId]: [] }));
       }
     },
-    [mapNodeLabels, selectedExecutionId, setExecutionLogs]
+    [currentWorkflowId, mapNodeLabels, selectedExecutionId, setExecutionLogs]
   );
 
   // Notify parent when a new execution starts and auto-expand it
@@ -669,6 +710,21 @@ export function WorkflowRuns({
   const refreshExecutionLogs = useCallback(
     async (executionId: string) => {
       try {
+        if (isLocalWorkflowId(currentWorkflowId)) {
+          const record = loadLocalRunRecords().find(
+            (item) => item.execution.id === executionId
+          );
+          const mappedLogs = record?.logs || [];
+          setLogs((prev) => ({
+            ...prev,
+            [executionId]: mappedLogs,
+          }));
+          if (executionId === selectedExecutionId) {
+            setExecutionLogs(createExecutionLogsMap(mappedLogs));
+          }
+          return;
+        }
+
         const logsData = await api.workflow.getExecutionLogs(executionId);
         const mappedLogs = mapNodeLabels(
           logsData.logs,
@@ -687,12 +743,15 @@ export function WorkflowRuns({
         console.error(`Failed to refresh logs for ${executionId}:`, error);
       }
     },
-    [mapNodeLabels, selectedExecutionId, setExecutionLogs]
+    [currentWorkflowId, mapNodeLabels, selectedExecutionId, setExecutionLogs]
   );
 
   // Poll for new executions when tab is active
   useEffect(() => {
-    if (!(isActive && currentWorkflowId)) {
+    if (
+      !(isActive && currentWorkflowId) ||
+      isLocalWorkflowId(currentWorkflowId)
+    ) {
       return;
     }
 

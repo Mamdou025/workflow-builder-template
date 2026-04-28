@@ -1,7 +1,5 @@
 {
   "permissions": {
-    "allow": [
-      "PowerShell(taskkill /IM node.exe /F)"
-    ]
+    "allow": ["PowerShell(taskkill /IM node.exe /F)"]
   }
 }
