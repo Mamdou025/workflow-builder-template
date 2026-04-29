@@ -13,6 +13,7 @@ import {
   Settings2,
   Trash2,
 } from "lucide-react";
+import { nanoid } from "nanoid";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ConfirmOverlay } from "@/components/overlays/confirm-overlay";
@@ -22,19 +23,30 @@ import { Button } from "@/components/ui/button";
 import { CodeEditor } from "@/components/ui/code-editor";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { EdgeInspector } from "@/components/workflow/edge-inspector";
 import { api } from "@/lib/api-client";
 import { integrationsAtom } from "@/lib/integrations-store";
 import {
   clearLocalRunRecords,
+  createCanvasEdgeFromWorkflowEdge,
+  createWorkflowBlockFromCatalog,
+  createWorkflowEdgeRecord,
   type FiscalStage,
+  getBlockCatalogItem,
   getFiscalPreset,
+  getFiscalVisualForFamily,
   getFiscalVisualForStage,
+  getPendingWorkflowConnection,
+  getUnsupportedWorkflowRelationshipMessage,
+  getWorkflowEdgeDefaults,
   isLocalWorkflowId,
   saveLocalWorkflowSnapshot,
+  type WorkflowBlock,
 } from "@/lib/local-fiscal-workflow";
 import type { IntegrationType } from "@/lib/types/integration";
 import { generateWorkflowCode } from "@/lib/workflow-codegen";
 import {
+  autosaveAtom,
   clearNodeStatusesAtom,
   clearWorkflowAtom,
   currentWorkflowIdAtom,
@@ -42,6 +54,8 @@ import {
   deleteEdgeAtom,
   deleteNodeAtom,
   edgesAtom,
+  hasUnsavedChangesAtom,
+  insertBlockBetweenEdgeAtom,
   isGeneratingAtom,
   isWorkflowOwnerAtom,
   newlyCreatedNodeIdAtom,
@@ -49,6 +63,7 @@ import {
   propertiesPanelActiveTabAtom,
   selectedEdgeAtom,
   selectedNodeAtom,
+  updateEdgeDataAtom,
   updateNodeDataAtom,
 } from "@/lib/workflow-store";
 import { findActionById } from "@/plugins";
@@ -100,7 +115,7 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
   const [selectedNodeId] = useAtom(selectedNodeAtom);
   const [selectedEdgeId] = useAtom(selectedEdgeAtom);
   const [nodes] = useAtom(nodesAtom);
-  const [edges] = useAtom(edgesAtom);
+  const [edges, setEdges] = useAtom(edgesAtom);
   const [isGenerating] = useAtom(isGeneratingAtom);
   const [currentWorkflowId] = useAtom(currentWorkflowIdAtom);
   const [currentWorkflowName, setCurrentWorkflowName] = useAtom(
@@ -108,8 +123,12 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
   );
   const isOwner = useAtomValue(isWorkflowOwnerAtom);
   const updateNodeData = useSetAtom(updateNodeDataAtom);
+  const updateEdgeData = useSetAtom(updateEdgeDataAtom);
+  const triggerAutosave = useSetAtom(autosaveAtom);
+  const setHasUnsavedChanges = useSetAtom(hasUnsavedChangesAtom);
   const deleteNode = useSetAtom(deleteNodeAtom);
   const deleteEdge = useSetAtom(deleteEdgeAtom);
+  const insertBlockBetweenEdge = useSetAtom(insertBlockBetweenEdgeAtom);
   const clearNodeStatuses = useSetAtom(clearNodeStatusesAtom);
   const clearWorkflow = useSetAtom(clearWorkflowAtom);
   const [newlyCreatedNodeId, setNewlyCreatedNodeId] = useAtom(
@@ -121,6 +140,12 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId);
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId);
+  const selectedEdgeSourceNode = selectedEdge
+    ? nodes.find((node) => node.id === selectedEdge.source)
+    : undefined;
+  const selectedEdgeTargetNode = selectedEdge
+    ? nodes.find((node) => node.id === selectedEdge.target)
+    : undefined;
 
   // Auto-fix invalid integration references
   const globalIntegrations = useAtomValue(integrationsAtom);
@@ -220,6 +245,134 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
       });
     },
     [selectedNode, updateNodeData]
+  );
+
+  const createPendingRelationshipForBlock = useCallback(
+    (block: WorkflowBlock) => {
+      if (!selectedNode) {
+        return false;
+      }
+
+      const pendingConnection = getPendingWorkflowConnection(
+        selectedNode.data.config?.pendingConnection
+      );
+      if (!pendingConnection) {
+        return false;
+      }
+
+      const sourceBlock =
+        pendingConnection.sourceBlockId === block.id
+          ? block
+          : nodes.find((node) => node.id === pendingConnection.sourceBlockId)
+              ?.data.block;
+      const targetBlock =
+        pendingConnection.targetBlockId === block.id
+          ? block
+          : nodes.find((node) => node.id === pendingConnection.targetBlockId)
+              ?.data.block;
+      const edgeDefaults =
+        sourceBlock && targetBlock
+          ? getWorkflowEdgeDefaults({ sourceBlock, targetBlock })
+          : null;
+
+      if (!edgeDefaults) {
+        toast.warning(
+          getUnsupportedWorkflowRelationshipMessage({
+            sourceBlock,
+            targetBlock,
+          })
+        );
+        return false;
+      }
+
+      const relationshipExists = edges.some(
+        (edge) =>
+          edge.source === pendingConnection.sourceBlockId &&
+          edge.target === pendingConnection.targetBlockId
+      );
+      if (relationshipExists) {
+        return false;
+      }
+
+      const workflowEdge = createWorkflowEdgeRecord({
+        id: nanoid(),
+        sourceBlockId: pendingConnection.sourceBlockId,
+        targetBlockId: pendingConnection.targetBlockId,
+        relationshipType: edgeDefaults.relationshipType,
+        reason: edgeDefaults.reason,
+      });
+      const newEdge = {
+        ...createCanvasEdgeFromWorkflowEdge(workflowEdge),
+        sourceHandle: pendingConnection.sourceHandle,
+        targetHandle: pendingConnection.targetHandle,
+      };
+
+      setEdges([...edges, newEdge]);
+      setHasUnsavedChanges(true);
+      triggerAutosave({ immediate: true });
+      toast.success("Typed relationship created");
+      return true;
+    },
+    [
+      edges,
+      nodes,
+      selectedNode,
+      setEdges,
+      setHasUnsavedChanges,
+      triggerAutosave,
+    ]
+  );
+
+  const handleApplyBlockCatalogItem = useCallback(
+    (catalogId: string) => {
+      if (!selectedNode || selectedNode.data.type !== "action") {
+        return;
+      }
+
+      const catalogItem = getBlockCatalogItem(catalogId);
+      if (!catalogItem) {
+        return;
+      }
+
+      const configWithoutActionType = Object.fromEntries(
+        Object.entries(selectedNode.data.config ?? {}).filter(
+          ([key]) =>
+            key !== "actionType" &&
+            key !== "blockCandidate" &&
+            key !== "integrationId" &&
+            key !== "pendingConnection"
+        )
+      );
+      const block = createWorkflowBlockFromCatalog(catalogId, {
+        id: selectedNode.id,
+        label:
+          selectedNode.data.label && selectedNode.data.label.trim().length > 0
+            ? selectedNode.data.label
+            : catalogItem.label,
+        description:
+          selectedNode.data.description &&
+          selectedNode.data.description.trim().length > 0
+            ? selectedNode.data.description
+            : catalogItem.description,
+        position: selectedNode.position,
+        config: configWithoutActionType,
+      });
+      const visual = getFiscalVisualForFamily(block.family);
+
+      updateNodeData({
+        id: selectedNode.id,
+        data: {
+          label: block.label,
+          description: block.description,
+          visualLevel: visual.visualLevel,
+          visualRole: visual.visualRole,
+          config: block.config,
+          block,
+        },
+      });
+      createPendingRelationshipForBlock(block);
+    },
+    [createPendingRelationshipForBlock, selectedNode, updateNodeData]
   );
 
   const handleUpdateFiscalStage = useCallback(
@@ -385,7 +538,12 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
     setCurrentWorkflowName(newName);
 
     if (isLocalWorkflowId(currentWorkflowId)) {
-      saveLocalWorkflowSnapshot({ name: newName, nodes, edges });
+      saveLocalWorkflowSnapshot({
+        edges,
+        name: newName,
+        nodes,
+        status: "draft",
+      });
       return;
     }
 
@@ -411,9 +569,10 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
         if (isLocalWorkflowId(currentWorkflowId)) {
           clearWorkflow();
           saveLocalWorkflowSnapshot({
+            edges: [],
             name: currentWorkflowName,
             nodes: [],
-            edges: [],
+            status: "draft",
           });
           return;
         }
@@ -437,9 +596,10 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
         if (isLocalWorkflowId(currentWorkflowId)) {
           clearWorkflow();
           saveLocalWorkflowSnapshot({
+            edges: [],
             name: currentWorkflowName,
             nodes: [],
-            edges: [],
+            status: "draft",
           });
           toast.success("Local workflow cleared");
           return;
@@ -496,33 +656,40 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
     }
   };
 
+  const handleInsertBlockBetweenEdge = (catalogId: string) => {
+    if (!selectedEdgeId) {
+      return;
+    }
+
+    const result = insertBlockBetweenEdge({
+      catalogId,
+      edgeId: selectedEdgeId,
+    });
+    if (result.ok) {
+      toast.success(result.message);
+      return;
+    }
+    toast.warning(result.message);
+  };
+
   // If an edge is selected, show edge properties
   if (selectedEdge && !selectedNode) {
     return (
       <div className="flex h-full max-h-[80vh] flex-col">
-        <SmartOverlayHeader overlayId={overlayId} title="Connection" />
+        <SmartOverlayHeader overlayId={overlayId} title="Relationship" />
 
         <div className="flex-1 space-y-4 overflow-y-auto px-6 pt-4 pb-6">
-          <div className="space-y-2">
-            <Label htmlFor="edge-id">Connection ID</Label>
-            <Input disabled id="edge-id" value={selectedEdge.id} />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="edge-source">Source</Label>
-            <Input disabled id="edge-source" value={selectedEdge.source} />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="edge-target">Target</Label>
-            <Input disabled id="edge-target" value={selectedEdge.target} />
-          </div>
-          {isOwner && (
-            <div className="pt-2">
-              <Button onClick={handleDeleteEdge} variant="ghost">
-                <Trash2 className="mr-2 size-4" />
-                Delete Connection
-              </Button>
-            </div>
-          )}
+          <EdgeInspector
+            disabled={isGenerating || !isOwner}
+            edge={selectedEdge}
+            onDelete={handleDeleteEdge}
+            onInsertBlockBetween={handleInsertBlockBetweenEdge}
+            onUpdate={(updates) =>
+              updateEdgeData({ id: selectedEdge.id, updates })
+            }
+            sourceBlock={selectedEdgeSourceNode?.data.block}
+            targetBlock={selectedEdgeTargetNode?.data.block}
+          />
         </div>
       </div>
     );
@@ -700,6 +867,17 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
     );
   }
 
+  const sourceEvidenceLocked = Boolean(
+    selectedNode.data.block?.source?.treatedAsEvidence &&
+      selectedNode.data.block.source.immutable
+  );
+  const protectedNeedsUnlock = Boolean(
+    selectedNode.data.block?.governance?.requiresUnlockToEdit &&
+      !selectedNode.data.config?.protectedEditIntent
+  );
+  const identityFieldsDisabled =
+    isGenerating || !isOwner || sourceEvidenceLocked || protectedNeedsUnlock;
+
   return (
     <div className="flex h-full max-h-[80vh] flex-col">
       {/* Header with current tab name */}
@@ -720,6 +898,14 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
                   onSelectAction={(actionType) => {
                     if (actionType.startsWith("preset:")) {
                       handleApplyVisualPreset(actionType);
+                      if (selectedNode?.id === newlyCreatedNodeId) {
+                        setNewlyCreatedNodeId(null);
+                      }
+                      return;
+                    }
+
+                    if (getBlockCatalogItem(actionType)) {
+                      handleApplyBlockCatalogItem(actionType);
                       if (selectedNode?.id === newlyCreatedNodeId) {
                         setNewlyCreatedNodeId(null);
                       }
@@ -773,7 +959,7 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
                 <div className="space-y-2">
                   <Label htmlFor="label">Label</Label>
                   <Input
-                    disabled={isGenerating || !isOwner}
+                    disabled={identityFieldsDisabled}
                     id="label"
                     onChange={(e) => handleUpdateLabel(e.target.value)}
                     value={selectedNode.data.label as string}
@@ -782,7 +968,7 @@ export function ConfigurationOverlay({ overlayId }: ConfigurationOverlayProps) {
                 <div className="space-y-2">
                   <Label htmlFor="description">Description</Label>
                   <Input
-                    disabled={isGenerating || !isOwner}
+                    disabled={identityFieldsDisabled}
                     id="description"
                     onChange={(e) => handleUpdateDescription(e.target.value)}
                     placeholder="Optional description"

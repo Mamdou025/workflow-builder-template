@@ -2,6 +2,7 @@
 
 import {
   ConnectionMode,
+  type EdgeMouseHandler,
   MiniMap,
   type Node,
   type NodeMouseHandler,
@@ -20,8 +21,17 @@ import { AIPrompt } from "@/components/ai-elements/prompt";
 import { WorkflowToolbar } from "@/components/workflow/workflow-toolbar";
 import "@xyflow/react/dist/style.css";
 
-import { PlayCircle, Zap } from "lucide-react";
 import { nanoid } from "nanoid";
+import { toast } from "sonner";
+import {
+  createCanvasEdgeFromWorkflowEdge,
+  createDefaultWorkflowBlockCandidate,
+  createPendingWorkflowConnection,
+  createWorkflowEdgeRecord,
+  getUnsupportedWorkflowRelationshipMessage,
+  getWorkflowEdgeDefaults,
+  isLocalWorkflowId,
+} from "@/lib/local-fiscal-workflow";
 import {
   addNodeAtom,
   autosaveAtom,
@@ -30,6 +40,7 @@ import {
   hasUnsavedChangesAtom,
   isGeneratingAtom,
   isPanelAnimatingAtom,
+  isSidebarCollapsedAtom,
   isTransitioningFromHomepageAtom,
   nodesAtom,
   onEdgesChangeAtom,
@@ -39,8 +50,8 @@ import {
   selectedEdgeAtom,
   selectedNodeAtom,
   showMinimapAtom,
+  updateNodeDataAtom,
   type WorkflowNode,
-  type WorkflowNodeType,
 } from "@/lib/workflow-store";
 import { Edge } from "../ai-elements/edge";
 import { Panel } from "../ai-elements/panel";
@@ -53,29 +64,36 @@ import {
   WorkflowContextMenu,
 } from "./workflow-context-menu";
 
-const nodeTemplates = [
-  {
-    type: "trigger" as WorkflowNodeType,
-    label: "",
-    description: "",
-    displayLabel: "Trigger",
-    icon: PlayCircle,
-    defaultConfig: { triggerType: "Manual" },
-  },
-  {
-    type: "action" as WorkflowNodeType,
-    label: "",
-    description: "",
-    displayLabel: "Action",
-    icon: Zap,
-    defaultConfig: {},
-  },
-];
-
 const edgeTypes = {
   animated: Edge.Animated,
   temporary: Edge.Temporary,
 };
+
+function getNeutralNodeForPendingConnection({
+  sourceNode,
+  targetNode,
+}: {
+  sourceNode?: WorkflowNode;
+  targetNode?: WorkflowNode;
+}): WorkflowNode | undefined {
+  const sourceIsTyped = Boolean(sourceNode?.data.block);
+  const targetIsTyped = Boolean(targetNode?.data.block);
+  const sourceIsNeutralAction = Boolean(
+    sourceNode && sourceNode.data.type === "action" && !sourceNode.data.block
+  );
+  const targetIsNeutralAction = Boolean(
+    targetNode && targetNode.data.type === "action" && !targetNode.data.block
+  );
+
+  if (sourceIsTyped && targetIsNeutralAction) {
+    return targetNode;
+  }
+  if (targetIsTyped && sourceIsNeutralAction) {
+    return sourceNode;
+  }
+
+  return;
+}
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: React Flow canvas requires complex setup
 export function WorkflowCanvas() {
@@ -93,10 +111,12 @@ export function WorkflowCanvas() {
   const onEdgesChange = useSetAtom(onEdgesChangeAtom);
   const setSelectedNode = useSetAtom(selectedNodeAtom);
   const setSelectedEdge = useSetAtom(selectedEdgeAtom);
+  const setSidebarCollapsed = useSetAtom(isSidebarCollapsedAtom);
   const addNode = useSetAtom(addNodeAtom);
   const setHasUnsavedChanges = useSetAtom(hasUnsavedChangesAtom);
   const triggerAutosave = useSetAtom(autosaveAtom);
   const setActiveTab = useSetAtom(propertiesPanelActiveTabAtom);
+  const updateNodeData = useSetAtom(updateNodeDataAtom);
   const { screenToFlowPosition, fitView, getViewport, setViewport } =
     useReactFlow();
 
@@ -271,24 +291,119 @@ export function WorkflowCanvas() {
 
   const onConnect: OnConnect = useCallback(
     (connection: XYFlowConnection) => {
-      const newEdge = {
+      if (!(connection.source && connection.target)) {
+        return;
+      }
+      const sourceNode = nodes.find((node) => node.id === connection.source);
+      const targetNode = nodes.find((node) => node.id === connection.target);
+      const sourceBlock = sourceNode?.data.block;
+      const targetBlock = targetNode?.data.block;
+      const edgeDefaults =
+        sourceBlock && targetBlock
+          ? getWorkflowEdgeDefaults({ sourceBlock, targetBlock })
+          : null;
+
+      if (!edgeDefaults) {
+        const neutralNode = getNeutralNodeForPendingConnection({
+          sourceNode,
+          targetNode,
+        });
+        if (neutralNode) {
+          updateNodeData({
+            id: neutralNode.id,
+            data: {
+              config: {
+                ...neutralNode.data.config,
+                blockCandidate: true,
+                pendingConnection: createPendingWorkflowConnection({
+                  sourceBlockId: connection.source,
+                  sourceHandle: connection.sourceHandle,
+                  targetBlockId: connection.target,
+                  targetHandle: connection.targetHandle,
+                }),
+              },
+            },
+          });
+          toast.info("Choose a block type to finish this relationship.");
+          return;
+        }
+
+        toast.warning(
+          getUnsupportedWorkflowRelationshipMessage({
+            sourceBlock,
+            targetBlock,
+          })
+        );
+        return;
+      }
+
+      const workflowEdge = createWorkflowEdgeRecord({
         id: nanoid(),
-        ...connection,
-        type: "animated",
+        sourceBlockId: connection.source,
+        targetBlockId: connection.target,
+        relationshipType: edgeDefaults.relationshipType,
+        reason: edgeDefaults.reason,
+      });
+      const newEdge = {
+        ...createCanvasEdgeFromWorkflowEdge(workflowEdge),
+        sourceHandle: connection.sourceHandle,
+        targetHandle: connection.targetHandle,
       };
       setEdges([...edges, newEdge]);
       setHasUnsavedChanges(true);
       // Trigger immediate autosave when nodes are connected
       triggerAutosave({ immediate: true });
     },
-    [edges, setEdges, setHasUnsavedChanges, triggerAutosave]
+    [
+      edges,
+      nodes,
+      setEdges,
+      setHasUnsavedChanges,
+      triggerAutosave,
+      updateNodeData,
+    ]
   );
 
   const onNodeClick: NodeMouseHandler = useCallback(
     (_event, node) => {
+      const workflowNode = node as WorkflowNode;
       setSelectedNode(node.id);
+      setSelectedEdge(null);
+      setActiveTab(
+        workflowNode.data.block?.family === "Logic" ? "code" : "properties"
+      );
+      setSidebarCollapsed(false);
     },
-    [setSelectedNode]
+    [setActiveTab, setSelectedEdge, setSelectedNode, setSidebarCollapsed]
+  );
+
+  const onEdgeClick: EdgeMouseHandler = useCallback(
+    (_event, edge) => {
+      setSelectedEdge(edge.id);
+      setSelectedNode(null);
+      setActiveTab("properties");
+      setSidebarCollapsed(false);
+      setEdges((currentEdges) =>
+        currentEdges.map((currentEdge) => ({
+          ...currentEdge,
+          selected: currentEdge.id === edge.id,
+        }))
+      );
+      setNodes((currentNodes) =>
+        currentNodes.map((currentNode) => ({
+          ...currentNode,
+          selected: false,
+        }))
+      );
+    },
+    [
+      setActiveTab,
+      setEdges,
+      setNodes,
+      setSelectedEdge,
+      setSelectedNode,
+      setSidebarCollapsed,
+    ]
   );
 
   const onConnectStart = useCallback(
@@ -368,12 +483,6 @@ export function WorkflowCanvas() {
         clientY
       );
 
-      // Get the action template
-      const actionTemplate = nodeTemplates.find((t) => t.type === "action");
-      if (!actionTemplate) {
-        return;
-      }
-
       // Get the position in the flow coordinate system
       const position = screenToFlowPosition({
         x: adjustedX,
@@ -385,19 +494,20 @@ export function WorkflowCanvas() {
       const nodeHeight = 192;
       position.y -= nodeHeight / 2;
 
-      const newNode: WorkflowNode = {
-        id: nanoid(),
-        type: actionTemplate.type,
+      const newNodeId = nanoid();
+      const fromSource = connectingHandleType.current === "source";
+      const sourceId = fromSource ? sourceNodeId : newNodeId;
+      const targetId = fromSource ? newNodeId : sourceNodeId;
+      const newNode: WorkflowNode = createDefaultWorkflowBlockCandidate({
+        id: newNodeId,
+        pendingConnection: createPendingWorkflowConnection({
+          sourceBlockId: sourceId,
+          sourceHandle: null,
+          targetBlockId: targetId,
+          targetHandle: null,
+        }),
         position,
-        data: {
-          label: actionTemplate.label,
-          description: actionTemplate.description,
-          type: actionTemplate.type,
-          config: actionTemplate.defaultConfig,
-          status: "idle",
-        },
-        selected: true,
-      };
+      });
 
       addNode(newNode);
       setSelectedNode(newNode.id);
@@ -414,19 +524,7 @@ export function WorkflowCanvas() {
         );
       }, 50);
 
-      // Create connection from the source node to the new node
-      const fromSource = connectingHandleType.current === "source";
-
-      const newEdge = {
-        id: nanoid(),
-        source: fromSource ? sourceNodeId : newNode.id,
-        target: fromSource ? newNode.id : sourceNodeId,
-        type: "animated",
-      };
-      setEdges([...edges, newEdge]);
-      setHasUnsavedChanges(true);
-      // Trigger immediate autosave for the new edge
-      triggerAutosave({ immediate: true });
+      toast.info("Choose a block type to finish this relationship.");
 
       // Set flag to prevent immediate deselection
       justCreatedNodeFromConnection.current = true;
@@ -438,13 +536,9 @@ export function WorkflowCanvas() {
       calculateMenuPosition,
       screenToFlowPosition,
       addNode,
-      edges,
-      setEdges,
       setNodes,
       setSelectedNode,
       setActiveTab,
-      setHasUnsavedChanges,
-      triggerAutosave,
     ]
   );
 
@@ -522,7 +616,7 @@ export function WorkflowCanvas() {
 
   return (
     <div
-      className="relative h-full bg-background"
+      className="relative h-full bg-[#1b1b1f]"
       data-testid="workflow-canvas"
       style={{
         opacity: isCanvasReady ? 1 : 0,
@@ -552,7 +646,7 @@ export function WorkflowCanvas() {
 
       {/* React Flow Canvas */}
       <Canvas
-        className="bg-background"
+        className="bg-[#1b1b1f]"
         connectionLineComponent={Connection}
         connectionMode={ConnectionMode.Strict}
         edges={edges}
@@ -566,6 +660,7 @@ export function WorkflowCanvas() {
         onConnect={isGenerating ? undefined : onConnect}
         onConnectEnd={isGenerating ? undefined : onConnectEnd}
         onConnectStart={isGenerating ? undefined : onConnectStart}
+        onEdgeClick={isGenerating ? undefined : onEdgeClick}
         onEdgeContextMenu={isGenerating ? undefined : onEdgeContextMenu}
         onEdgesChange={isGenerating ? undefined : onEdgesChange}
         onNodeClick={isGenerating ? undefined : onNodeClick}
@@ -587,7 +682,9 @@ export function WorkflowCanvas() {
       </Canvas>
 
       {/* AI Prompt */}
-      {currentWorkflowId && <AIPrompt workflowId={currentWorkflowId} />}
+      {currentWorkflowId && !isLocalWorkflowId(currentWorkflowId) && (
+        <AIPrompt workflowId={currentWorkflowId} />
+      )}
 
       {/* Context Menu */}
       <WorkflowContextMenu

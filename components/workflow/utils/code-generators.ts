@@ -8,6 +8,8 @@ import databaseQueryTemplate from "@/lib/codegen-templates/database-query";
 import httpRequestTemplate from "@/lib/codegen-templates/http-request";
 import { findActionById } from "@/plugins";
 
+const NON_IDENTIFIER_SEGMENT_REGEX = /[^a-zA-Z0-9]+/;
+
 // System action templates (non-plugin actions)
 const SYSTEM_ACTION_TEMPLATES: Record<string, string> = {
   "Database Query": databaseQueryTemplate,
@@ -30,12 +32,17 @@ const FALLBACK_UNKNOWN_CODE = `async function unknownStep(input: Record<string, 
 
 function generateFiscalBlockCode(config: NodeConfig | undefined): string {
   const stage = (config?.fiscalStage as string) || "logic";
+  const functionStage = stage
+    .split(NON_IDENTIFIER_SEGMENT_REGEX)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join("");
   const outputKey = (config?.outputs as string) || `${stage}Output`;
   const rulebookRef =
     (config?.rulebookRef as string) ||
     "Local prototype block with mock data only.";
 
-  return `async function fiscal${stage.charAt(0).toUpperCase()}${stage.slice(1)}Block(input: Record<string, unknown>) {
+  return `async function fiscal${functionStage || "Logic"}Block(input: Record<string, unknown>) {
   "use step";
 
   return {

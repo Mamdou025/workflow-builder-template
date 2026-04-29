@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 import { nanoid } from "nanoid";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
@@ -37,12 +37,18 @@ import { api } from "@/lib/api-client";
 import { authClient, useSession } from "@/lib/auth-client";
 import { integrationsAtom } from "@/lib/integrations-store";
 import {
+  createDefaultWorkflowBlockCandidate,
   createFapiSampleWorkflow,
   createLocalRunRecord,
+  createWorkflowEvent,
   isLocalWorkflowId,
+  loadLocalWorkflowSnapshot,
   parseLocalWorkflowJson,
+  publishLocalWorkflowSnapshot,
   saveLocalRunRecord,
   saveLocalWorkflowSnapshot,
+  saveWorkflowDefinitionSnapshot,
+  workflowDefinitionToCanvas,
 } from "@/lib/local-fiscal-workflow";
 import type { IntegrationType } from "@/lib/types/integration";
 import {
@@ -65,6 +71,7 @@ import {
   nodesAtom,
   propertiesPanelActiveTabAtom,
   redoAtom,
+  rightPanelWidthAtom,
   selectedEdgeAtom,
   selectedExecutionIdAtom,
   selectedNodeAtom,
@@ -95,6 +102,10 @@ import { UserMenu } from "../workflows/user-menu";
 type WorkflowToolbarProps = {
   workflowId?: string;
 };
+
+const LOCAL_PUBLISH_STATUS_KEY = "workflow-studio.publish-status";
+
+type LocalPublishStatus = "draft" | "published";
 
 // Helper functions to reduce complexity
 function updateNodesStatus(
@@ -576,7 +587,16 @@ function useWorkflowHandlers({
     setIsSaving(true);
     try {
       if (isLocalWorkflowId(currentWorkflowId)) {
-        saveLocalWorkflowSnapshot({ name: workflowName, nodes, edges });
+        saveLocalWorkflowSnapshot({
+          edges,
+          event: createWorkflowEvent({
+            type: "save_draft",
+            message: "Draft saved to localStorage.",
+          }),
+          name: workflowName,
+          nodes,
+          status: "draft",
+        });
         setHasUnsavedChanges(false);
         toast.success("Saved to local storage");
         return;
@@ -871,9 +891,14 @@ function useWorkflowActions(state: ReturnType<typeof useWorkflowState>) {
           setSelectedExecutionId(null);
           setExecutionLogs({});
           saveLocalWorkflowSnapshot({
+            edges: [],
+            event: createWorkflowEvent({
+              type: "save_draft",
+              message: "Local draft cleared.",
+            }),
             name: workflowName,
             nodes: [],
-            edges: [],
+            status: "draft",
           });
           setHasUnsavedChanges(false);
           return;
@@ -895,18 +920,23 @@ function useWorkflowActions(state: ReturnType<typeof useWorkflowState>) {
           return;
         }
         if (isLocal) {
-          const sample = createFapiSampleWorkflow();
-          setNodes(sample.nodes);
-          setEdges(sample.edges);
+          const sample = {
+            ...createFapiSampleWorkflow(),
+            events: [
+              createWorkflowEvent({
+                type: "reset_sample",
+                message: "Local studio reset to the FAPI-inspired sample.",
+              }),
+            ],
+          };
+          const canvas = workflowDefinitionToCanvas(sample);
+          setNodes(canvas.nodes);
+          setEdges(canvas.edges);
           setCurrentWorkflowName(sample.name);
-          setSelectedNodeId(sample.nodes[0]?.id ?? null);
+          setSelectedNodeId(canvas.nodes[0]?.id ?? null);
           setSelectedExecutionId(null);
           setExecutionLogs({});
-          saveLocalWorkflowSnapshot({
-            name: sample.name,
-            nodes: sample.nodes,
-            edges: sample.edges,
-          });
+          saveWorkflowDefinitionSnapshot(sample);
           setHasUnsavedChanges(false);
           toast.success("Local sample restored");
           return;
@@ -936,14 +966,21 @@ function useWorkflowActions(state: ReturnType<typeof useWorkflowState>) {
 
   const downloadLocalWorkflow = () => {
     const snapshot = saveLocalWorkflowSnapshot({
+      edges,
+      event: createWorkflowEvent({
+        type: "export_workflow",
+        message: "Workflow JSON exported locally.",
+      }),
       name: workflowName,
       nodes,
-      edges,
     });
     const blob = new Blob([JSON.stringify(snapshot, null, 2)], {
       type: "application/json",
     });
-    downloadBlob(blob, "fiscal-workflow-studio.json");
+    const safeName =
+      snapshot.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "workflow";
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    downloadBlob(blob, `workflow-studio-${safeName}-${timestamp}.json`);
     toast.success("Workflow JSON exported");
   };
 
@@ -1091,44 +1128,58 @@ function useWorkflowActions(state: ReturnType<typeof useWorkflowState>) {
     handleDuplicate,
     handleImportWorkflow: async (file: File) => {
       const text = await file.text();
-      const snapshot = parseLocalWorkflowJson(text);
-      setNodes(snapshot.nodes);
-      setEdges(snapshot.edges);
+      const parsedSnapshot = parseLocalWorkflowJson(text);
+      const snapshot = {
+        ...parsedSnapshot,
+        events: [
+          createWorkflowEvent({
+            type: "import_workflow",
+            message: `Imported workflow JSON from ${file.name}.`,
+            details: { fileName: file.name },
+          }),
+          ...parsedSnapshot.events,
+        ],
+      };
+      const canvas = workflowDefinitionToCanvas(snapshot);
+      setNodes(canvas.nodes);
+      setEdges(canvas.edges);
       setCurrentWorkflowName(snapshot.name);
-      setSelectedNodeId(snapshot.nodes[0]?.id ?? null);
+      setSelectedNodeId(canvas.nodes[0]?.id ?? null);
       setSelectedExecutionId(null);
       setExecutionLogs({});
-      saveLocalWorkflowSnapshot({
-        name: snapshot.name,
-        nodes: snapshot.nodes,
-        edges: snapshot.edges,
-      });
+      saveWorkflowDefinitionSnapshot(snapshot);
       setHasUnsavedChanges(false);
       toast.success("Workflow JSON imported");
+      return snapshot;
     },
     handleResetSample: () => {
       openOverlay(ConfirmOverlay, {
         title: "Reset Sample",
         message:
-          "Reset the local studio to the FAPI sample workflow? Current local nodes and connections will be replaced.",
+          "Reset the local studio to the FAPI-inspired sample workflow? Current local nodes and connections will be replaced.",
         confirmLabel: "Reset Sample",
         confirmVariant: "destructive" as const,
         destructive: true,
         onConfirm: () => {
-          const sample = createFapiSampleWorkflow();
-          setNodes(sample.nodes);
-          setEdges(sample.edges);
+          const sample = {
+            ...createFapiSampleWorkflow(),
+            events: [
+              createWorkflowEvent({
+                type: "reset_sample",
+                message: "Local studio reset to the FAPI-inspired sample.",
+              }),
+            ],
+          };
+          const canvas = workflowDefinitionToCanvas(sample);
+          setNodes(canvas.nodes);
+          setEdges(canvas.edges);
           setCurrentWorkflowName(sample.name);
-          setSelectedNodeId(sample.nodes[0]?.id ?? null);
+          setSelectedNodeId(canvas.nodes[0]?.id ?? null);
           setSelectedExecutionId(null);
           setExecutionLogs({});
-          saveLocalWorkflowSnapshot({
-            name: sample.name,
-            nodes: sample.nodes,
-            edges: sample.edges,
-          });
+          saveWorkflowDefinitionSnapshot(sample);
           setHasUnsavedChanges(false);
-          toast.success("FAPI sample restored");
+          toast.success("FAPI-inspired sample restored");
         },
       });
     },
@@ -1233,19 +1284,10 @@ function ToolbarActions({
       }
     }
 
-    // Create new action node
-    const newNode: WorkflowNode = {
+    const newNode = createDefaultWorkflowBlockCandidate({
       id: nanoid(),
-      type: "action",
       position: finalPosition,
-      data: {
-        label: "",
-        description: "",
-        type: "action",
-        config: {},
-        status: "idle",
-      },
-    };
+    });
 
     state.addNode(newNode);
     state.setSelectedNodeId(newNode.id);
@@ -1530,7 +1572,7 @@ function ResetSampleButton({
       disabled={state.isGenerating}
       onClick={actions.handleResetSample}
       size="icon"
-      title="Reset FAPI sample"
+      title="Reset sample workflow"
       variant="secondary"
     >
       <RotateCcw className="size-4" />
@@ -1713,9 +1755,279 @@ function WorkflowMenuComponent({
   );
 }
 
+function LocalStudioTopBar({
+  state,
+  actions,
+}: {
+  state: ReturnType<typeof useWorkflowState>;
+  actions: ReturnType<typeof useWorkflowActions>;
+}) {
+  const { screenToFlowPosition } = useReactFlow();
+  const rightPanelWidth = useAtomValue(rightPanelWidthAtom);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [publishStatus, setPublishStatus] = useState<LocalPublishStatus>(() => {
+    if (typeof window === "undefined") {
+      return "draft";
+    }
+    const snapshot = loadLocalWorkflowSnapshot();
+    return snapshot?.status === "published" ||
+      window.localStorage.getItem(LOCAL_PUBLISH_STATUS_KEY) === "published"
+      ? "published"
+      : "draft";
+  });
+  const [latestPublishedVersion, setLatestPublishedVersion] = useState<
+    number | null
+  >(() => loadLocalWorkflowSnapshot()?.publishedVersion?.versionNumber ?? null);
+  const graphInitializedRef = useRef(false);
+
+  const updatePublishStatus = useCallback((status: LocalPublishStatus) => {
+    setPublishStatus(status);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(LOCAL_PUBLISH_STATUS_KEY, status);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!graphInitializedRef.current) {
+      graphInitializedRef.current = true;
+      return;
+    }
+
+    if (state.hasUnsavedChanges && publishStatus === "published") {
+      updatePublishStatus("draft");
+    }
+  }, [state.hasUnsavedChanges, publishStatus, updatePublishStatus]);
+
+  useEffect(() => {
+    if (state.hasUnsavedChanges) {
+      return;
+    }
+
+    const snapshot = loadLocalWorkflowSnapshot();
+    if (!snapshot) {
+      return;
+    }
+
+    setPublishStatus(snapshot.status === "published" ? "published" : "draft");
+    setLatestPublishedVersion(snapshot.publishedVersion?.versionNumber ?? null);
+  }, [state.hasUnsavedChanges]);
+
+  const handleAddStep = () => {
+    const flowWrapper = document.querySelector(".react-flow");
+    if (!flowWrapper) {
+      return;
+    }
+
+    const rect = flowWrapper.getBoundingClientRect();
+    const position = screenToFlowPosition({
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+    });
+    position.x -= 96;
+    position.y -= 96;
+
+    const newNode = createDefaultWorkflowBlockCandidate({
+      id: nanoid(),
+      position,
+    });
+
+    state.addNode(newNode);
+    state.setSelectedNodeId(newNode.id);
+    state.setActiveTab("properties");
+  };
+
+  const handlePublish = () => {
+    if (state.isLocal) {
+      const result = publishLocalWorkflowSnapshot({
+        edges: state.edges,
+        name: state.workflowName,
+        nodes: state.nodes,
+        notes: "Published from the local Workflow Studio toolbar.",
+      });
+      state.setNodes(workflowDefinitionToCanvas(result.workflow).nodes);
+      state.setEdges(workflowDefinitionToCanvas(result.workflow).edges);
+      state.setHasUnsavedChanges(false);
+      setLatestPublishedVersion(result.snapshot.versionNumber);
+      if (result.warnings.length > 0) {
+        toast.warning(
+          `Published locally with ${result.warnings.length} warning${result.warnings.length === 1 ? "" : "s"}`
+        );
+      } else {
+        toast.success("Published locally");
+      }
+    }
+    updatePublishStatus("published");
+  };
+
+  const statusLabel =
+    state.hasUnsavedChanges || publishStatus === "draft"
+      ? "Draft"
+      : "Published";
+  const isPublished = statusLabel === "Published";
+
+  return (
+    <div
+      className="pointer-events-auto absolute top-3 left-[4.75rem] z-30"
+      style={{
+        right: rightPanelWidth ? `calc(${rightPanelWidth} + 1rem)` : "1rem",
+      }}
+    >
+      <div className="flex min-h-12 items-center justify-between gap-3 rounded-md border bg-background/95 px-3 py-2 shadow-sm backdrop-blur">
+        <div className="flex min-w-0 items-center gap-3">
+          <WorkflowIcon className="size-5 shrink-0" />
+          <div className="min-w-0">
+            <div className="truncate font-semibold text-sm">
+              {state.workflowName || "Fiscal Workflow Studio"}
+            </div>
+            <div className="text-muted-foreground text-xs">Workflow Studio</div>
+          </div>
+          <span
+            className={`inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 font-medium text-xs ${
+              isPublished
+                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+            }`}
+          >
+            {statusLabel}
+          </span>
+          {latestPublishedVersion && (
+            <span className="hidden shrink-0 rounded-full border px-2 py-0.5 text-muted-foreground text-xs xl:inline-flex">
+              v{latestPublishedVersion}
+            </span>
+          )}
+        </div>
+
+        <div className="flex shrink-0 items-center gap-2">
+          <Button
+            disabled={state.isGenerating}
+            onClick={handleAddStep}
+            size="sm"
+            variant="secondary"
+          >
+            <Plus className="mr-2 size-4" />
+            Add Block
+          </Button>
+          <Button
+            disabled={
+              !state.currentWorkflowId || state.isGenerating || state.isSaving
+            }
+            onClick={actions.handleSave}
+            size="sm"
+            variant="secondary"
+          >
+            {state.isSaving ? (
+              <Loader2 className="mr-2 size-4 animate-spin" />
+            ) : (
+              <Save className="mr-2 size-4" />
+            )}
+            Save Draft
+          </Button>
+          <Button
+            disabled={
+              state.isDownloading ||
+              state.nodes.length === 0 ||
+              state.isGenerating ||
+              !state.currentWorkflowId
+            }
+            onClick={actions.handleDownload}
+            size="sm"
+            variant="secondary"
+          >
+            {state.isDownloading ? (
+              <Loader2 className="mr-2 size-4 animate-spin" />
+            ) : (
+              <Download className="mr-2 size-4" />
+            )}
+            Export JSON
+          </Button>
+          <Button
+            disabled={state.isGenerating}
+            onClick={() => inputRef.current?.click()}
+            size="sm"
+            variant="secondary"
+          >
+            <Upload className="mr-2 size-4" />
+            Import JSON
+          </Button>
+          <input
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) {
+                actions
+                  .handleImportWorkflow(file)
+                  .then((snapshot) => {
+                    updatePublishStatus(snapshot.status);
+                    setLatestPublishedVersion(
+                      snapshot.publishedVersion?.versionNumber ?? null
+                    );
+                  })
+                  .catch((error) => {
+                    toast.error(
+                      error instanceof Error
+                        ? error.message
+                        : "Failed to import workflow JSON"
+                    );
+                  });
+              }
+              event.target.value = "";
+            }}
+            ref={inputRef}
+            type="file"
+          />
+          <Button
+            disabled={state.isGenerating || state.isSaving}
+            onClick={handlePublish}
+            size="sm"
+            variant={isPublished ? "outline" : "default"}
+          >
+            <Globe className="mr-2 size-4" />
+            Publish
+          </Button>
+          <Button
+            disabled={state.isGenerating}
+            onClick={() => {
+              actions.handleResetSample();
+              updatePublishStatus("draft");
+              setLatestPublishedVersion(null);
+            }}
+            size="sm"
+            variant="secondary"
+          >
+            <RotateCcw className="mr-2 size-4" />
+            Reset Sample
+          </Button>
+          <Button
+            disabled={
+              state.isExecuting ||
+              state.nodes.length === 0 ||
+              state.isGenerating
+            }
+            onClick={() => actions.handleExecute()}
+            size="sm"
+            variant="secondary"
+          >
+            {state.isExecuting ? (
+              <Loader2 className="mr-2 size-4 animate-spin" />
+            ) : (
+              <Play className="mr-2 size-4" />
+            )}
+            Run
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export const WorkflowToolbar = ({ workflowId }: WorkflowToolbarProps) => {
   const state = useWorkflowState();
   const actions = useWorkflowActions(state);
+
+  if (state.isLocal) {
+    return <LocalStudioTopBar actions={actions} state={state} />;
+  }
 
   return (
     <>

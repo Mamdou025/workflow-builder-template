@@ -3,14 +3,17 @@
 import { useAtom, useSetAtom } from "jotai";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { NodeConfigPanel } from "@/components/workflow/node-config-panel";
+import { WorkflowStudioShell } from "@/components/workflow/workflow-studio-shell";
 import { useIsMobile } from "@/hooks/use-mobile";
 import {
   createFapiSampleWorkflow,
   LOCAL_WORKFLOW_ID,
-  loadLocalWorkflowSnapshot,
-  saveLocalWorkflowSnapshot,
+  loadLocalWorkflowSnapshotResult,
+  saveWorkflowDefinitionSnapshot,
+  workflowDefinitionToCanvas,
 } from "@/lib/local-fiscal-workflow";
 import {
   currentWorkflowIdAtom,
@@ -57,10 +60,17 @@ const Home = () => {
   const [panelVisible, setPanelVisible] = useState(false);
 
   useEffect(() => {
-    const snapshot = loadLocalWorkflowSnapshot() || createFapiSampleWorkflow();
+    const loadResult = loadLocalWorkflowSnapshotResult();
+    if (loadResult.warning) {
+      toast.warning(
+        "Saved local workflow could not be loaded. Restored the sample workflow."
+      );
+    }
+    const snapshot = loadResult.snapshot || createFapiSampleWorkflow();
+    const canvas = workflowDefinitionToCanvas(snapshot);
     const selectedNode =
-      snapshot.nodes.find((node) => node.selected) || snapshot.nodes[0];
-    const nodesWithSelection = snapshot.nodes.map((node) => ({
+      canvas.nodes.find((node) => node.selected) || canvas.nodes[0];
+    const nodesWithSelection = canvas.nodes.map((node) => ({
       ...node,
       selected: selectedNode ? node.id === selectedNode.id : false,
       data: {
@@ -70,7 +80,7 @@ const Home = () => {
     }));
 
     setNodes(nodesWithSelection);
-    setEdges(snapshot.edges);
+    setEdges(canvas.edges);
     setCurrentWorkflowId(LOCAL_WORKFLOW_ID);
     setCurrentWorkflowName(snapshot.name);
     setCurrentWorkflowVisibility("private");
@@ -81,11 +91,7 @@ const Home = () => {
     setSelectedNode(selectedNode?.id ?? null);
     setSelectedEdge(null);
     setSelectedExecutionId(null);
-    saveLocalWorkflowSnapshot({
-      name: snapshot.name,
-      nodes: nodesWithSelection,
-      edges: snapshot.edges,
-    });
+    saveWorkflowDefinitionSnapshot(snapshot);
     initializedRef.current = true;
     setPanelVisible(true);
   }, [
@@ -131,9 +137,15 @@ const Home = () => {
 
   return (
     <div className="flex h-dvh w-full flex-col overflow-hidden">
+      <WorkflowStudioShell
+        isMobile={isMobile}
+        rightPanelCollapsed={panelCollapsed}
+        rightPanelWidthPercent={LOCAL_PANEL_WIDTH}
+      />
+
       {!isMobile && panelCollapsed && (
         <Button
-          className="-translate-y-1/2 pointer-events-auto absolute top-1/2 right-0 z-20 size-7 rounded-r-none rounded-l-full border-r-0 bg-background shadow-sm"
+          className="-translate-y-1/2 pointer-events-auto absolute top-1/2 right-0 z-20 h-12 w-7 rounded-r-none rounded-l-full border-r-0 bg-background shadow-sm hover:bg-muted"
           onClick={() => togglePanel(false)}
           size="icon"
           title="Open properties"
@@ -155,7 +167,7 @@ const Home = () => {
           }}
         >
           <Button
-            className="-translate-x-1/2 -translate-y-1/2 absolute top-1/2 left-0 z-10 size-7 rounded-full bg-background opacity-70 shadow-sm hover:opacity-100"
+            className="-translate-x-1/2 -translate-y-1/2 absolute top-1/2 left-0 z-10 h-12 w-7 rounded-r-none rounded-l-full bg-background opacity-70 shadow-sm hover:bg-muted hover:opacity-100"
             onClick={() => togglePanel(true)}
             size="icon"
             title="Collapse properties"

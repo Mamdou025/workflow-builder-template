@@ -38,6 +38,11 @@ import {
 } from "@/lib/workflow-store";
 import { findActionById, getIntegration } from "@/plugins";
 import {
+  FamilyNodeShape,
+  getFamilyCanvasTitle,
+  getFamilyNodeStyle,
+} from "./family-node-shape";
+import {
   getVisualBadgeText,
   getVisualLevelStyle,
   getVisualPlaceholderDescription,
@@ -285,7 +290,21 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
     const isDisabled = data.enabled === false;
     const visualLevel = resolveVisualLevel(data);
     const visualStyle = getVisualLevelStyle(visualLevel);
-    const visualBadge = getVisualBadgeText(visualLevel, data.visualRole);
+    const familyStyle = getFamilyNodeStyle(data);
+    const nodeStyle = familyStyle || visualStyle;
+    const visualBadge = familyStyle
+      ? null
+      : getVisualBadgeText(visualLevel, data.visualRole);
+    const hasPendingConnection = Boolean(data.config?.pendingConnection);
+    const displayTitle = familyStyle
+      ? getFamilyCanvasTitle(data, data.label || "Action")
+      : data.label || "Action";
+    let displayDescription: string | null = null;
+    if (!familyStyle) {
+      displayDescription = hasPendingConnection
+        ? "Choose type to finish relationship"
+        : getVisualPlaceholderDescription(visualLevel);
+    }
     const openActionPicker = () => {
       setSelectedNode(id);
       setSelectedEdge(null);
@@ -297,7 +316,7 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
       <Node
         className={cn(
           "relative flex flex-col items-center justify-center shadow-none transition-all duration-150 ease-out",
-          visualStyle.nodeClassName,
+          nodeStyle.nodeClassName,
           selected &&
             "ring-2 ring-primary/70 ring-offset-2 ring-offset-background",
           isDisabled && "opacity-50"
@@ -306,7 +325,7 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
         handles={{ target: true, source: true }}
         status={status}
       >
-        <VisualLevelDecor visualLevel={visualLevel} />
+        {!familyStyle && <VisualLevelDecor visualLevel={visualLevel} />}
         {isDisabled && (
           <div className="absolute top-2 left-2 rounded-full bg-gray-500/50 p-1">
             <EyeOff className="size-3.5 text-white" />
@@ -316,7 +335,7 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
           <div
             className={cn(
               "-translate-x-1/2 absolute left-1/2 z-10 rounded-full border px-2 py-0.5 font-semibold text-[10px]",
-              visualStyle.badgeClassName
+              nodeStyle.badgeClassName
             )}
           >
             {visualBadge}
@@ -325,7 +344,7 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
         <button
           className={cn(
             "relative z-10 flex flex-col items-center justify-center text-center",
-            visualStyle.contentClassName
+            nodeStyle.contentClassName
           )}
           onClick={(event) => {
             event.stopPropagation();
@@ -333,30 +352,48 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
           }}
           type="button"
         >
-          <VisualLevelIcon visualLevel={visualLevel} />
+          {familyStyle ? (
+            <FamilyNodeShape data={data} />
+          ) : (
+            <VisualLevelIcon visualLevel={visualLevel} />
+          )}
           <div
             className={cn(
               "-translate-x-1/2 absolute top-[calc(100%+0.5rem)] left-1/2 flex flex-col items-center gap-0.5 text-center",
-              visualStyle.captionClassName
+              nodeStyle.captionClassName
             )}
           >
             <NodeTitle className="max-w-full truncate text-sm leading-tight">
-              {data.label || "Action"}
+              {displayTitle}
             </NodeTitle>
-            <NodeDescription className="max-w-full truncate text-[11px] leading-tight">
-              {getVisualPlaceholderDescription(visualLevel)}
-            </NodeDescription>
+            {displayDescription && (
+              <NodeDescription className="max-w-full truncate text-[11px] leading-tight">
+                {displayDescription}
+              </NodeDescription>
+            )}
           </div>
         </button>
       </Node>
     );
   }
 
+  const isDisabled = data.enabled === false;
+  const visualLevel = resolveVisualLevel(data);
+  const visualStyle = getVisualLevelStyle(visualLevel);
+  const familyStyle = getFamilyNodeStyle(data);
+  const nodeStyle = familyStyle || visualStyle;
+  const visualBadge = familyStyle
+    ? null
+    : getVisualBadgeText(visualLevel, data.visualRole);
   // Get human-readable label from registry if no custom label is set
   const actionInfo = findActionById(actionType);
-  const displayTitle = data.label || actionInfo?.label || actionType;
-  const displayDescription =
-    data.description || getIntegrationFromActionType(actionType);
+  const rawDisplayTitle = data.label || actionInfo?.label || actionType;
+  const displayTitle = familyStyle
+    ? getFamilyCanvasTitle(data, rawDisplayTitle)
+    : rawDisplayTitle;
+  const displayDescription = familyStyle
+    ? null
+    : data.description || getIntegrationFromActionType(actionType);
 
   const needsIntegration = requiresIntegration(actionType);
   // Don't show missing indicator if we're still checking for auto-select
@@ -389,10 +426,6 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
   };
 
   const aiModel = getAiModel();
-  const isDisabled = data.enabled === false;
-  const visualLevel = resolveVisualLevel(data);
-  const visualStyle = getVisualLevelStyle(visualLevel);
-  const visualBadge = getVisualBadgeText(visualLevel, data.visualRole);
   let nodeIcon = (
     <VisualLevelIcon visualLevel={visualLevel}>
       {getProviderLogo(actionType)}
@@ -409,7 +442,14 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
     );
   }
 
-  if (visualLevel) {
+  if (familyStyle) {
+    nodeIcon = (
+      <FamilyNodeShape
+        data={data}
+        fallback={hasGeneratedImage ? nodeIcon : undefined}
+      />
+    );
+  } else if (visualLevel) {
     nodeIcon = <VisualLevelIcon visualLevel={visualLevel} />;
   }
 
@@ -417,7 +457,7 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
     <Node
       className={cn(
         "relative flex flex-col items-center justify-center shadow-none transition-all duration-150 ease-out",
-        visualStyle.nodeClassName,
+        nodeStyle.nodeClassName,
         selected &&
           "ring-2 ring-primary/70 ring-offset-2 ring-offset-background",
         isDisabled && "opacity-50"
@@ -426,7 +466,7 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
       handles={{ target: true, source: true }}
       status={status}
     >
-      <VisualLevelDecor visualLevel={visualLevel} />
+      {!familyStyle && <VisualLevelDecor visualLevel={visualLevel} />}
 
       {/* Disabled badge in top left */}
       {isDisabled && (
@@ -450,7 +490,7 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
         <div
           className={cn(
             "-translate-x-1/2 absolute left-1/2 z-10 rounded-full border px-2 py-0.5 font-semibold text-[10px]",
-            visualStyle.badgeClassName
+            nodeStyle.badgeClassName
           )}
         >
           {visualBadge}
@@ -460,14 +500,14 @@ export const ActionNode = memo(({ data, selected, id }: ActionNodeProps) => {
       <div
         className={cn(
           "relative z-10 flex flex-col items-center justify-center",
-          visualStyle.contentClassName
+          nodeStyle.contentClassName
         )}
       >
         {nodeIcon}
         <div
           className={cn(
             "-translate-x-1/2 absolute top-[calc(100%+0.5rem)] left-1/2 flex flex-col items-center gap-0.5 text-center",
-            visualStyle.captionClassName
+            nodeStyle.captionClassName
           )}
         >
           <NodeTitle className="max-w-full truncate text-sm leading-tight">

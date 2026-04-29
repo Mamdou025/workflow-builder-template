@@ -35,10 +35,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useIsTouch } from "@/hooks/use-touch";
-import {
-  FISCAL_STAGE_OPTIONS,
-  isLocalWorkflowId,
-} from "@/lib/local-fiscal-workflow";
+import { BLOCK_CATALOG, isLocalWorkflowId } from "@/lib/local-fiscal-workflow";
 import { cn } from "@/lib/utils";
 import { currentWorkflowIdAtom } from "@/lib/workflow-store";
 import { getAllActions } from "@/plugins";
@@ -51,14 +48,12 @@ type ActionType = {
   integration?: string;
 };
 
-const FISCAL_WORKFLOW_ACTIONS: ActionType[] = FISCAL_STAGE_OPTIONS.map(
-  (option) => ({
-    id: option.id,
-    label: option.label,
-    description: option.description,
-    category: "Fiscal Workflow",
-  })
-);
+const LOCAL_BLOCK_ACTIONS: ActionType[] = BLOCK_CATALOG.map((item) => ({
+  id: item.id,
+  label: item.label,
+  description: item.description,
+  category: item.family,
+}));
 
 // System actions that don't have plugins
 const SYSTEM_ACTIONS: ActionType[] = [
@@ -82,11 +77,39 @@ const SYSTEM_ACTIONS: ActionType[] = [
   },
 ];
 
+const BLOCK_CATEGORY_ORDER = [
+  "Source",
+  "Logic",
+  "Review / Validation",
+  "Protected",
+  "Output",
+  "AI / Agent",
+];
+
+function getActionCategoryRank(category: string): number {
+  const blockIndex = BLOCK_CATEGORY_ORDER.indexOf(category);
+  if (blockIndex !== -1) {
+    return blockIndex;
+  }
+  if (category === "System") {
+    return BLOCK_CATEGORY_ORDER.length;
+  }
+  return BLOCK_CATEGORY_ORDER.length + 1;
+}
+
+function compareActionCategories(a: string, b: string): number {
+  const rankDifference = getActionCategoryRank(a) - getActionCategoryRank(b);
+  if (rankDifference !== 0) {
+    return rankDifference;
+  }
+  return a.localeCompare(b);
+}
+
 // Combine System actions with plugin actions
 function useAllActions(localMode: boolean): ActionType[] {
   return useMemo(() => {
     if (localMode) {
-      return FISCAL_WORKFLOW_ACTIONS;
+      return LOCAL_BLOCK_ACTIONS;
     }
 
     const pluginActions = getAllActions();
@@ -100,11 +123,7 @@ function useAllActions(localMode: boolean): ActionType[] {
       integration: action.integration,
     }));
 
-    return [
-      ...FISCAL_WORKFLOW_ACTIONS,
-      ...SYSTEM_ACTIONS,
-      ...mappedPluginActions,
-    ];
+    return [...LOCAL_BLOCK_ACTIONS, ...SYSTEM_ACTIONS, ...mappedPluginActions];
   }, [localMode]);
 }
 
@@ -133,7 +152,22 @@ function GroupIcon({
   if (group.category === "System") {
     return <Settings className="size-4" />;
   }
-  if (group.category === "Fiscal Workflow") {
+  if (group.category === "Source") {
+    return <FileText className="size-4" />;
+  }
+  if (group.category === "Logic") {
+    return <Calculator className="size-4" />;
+  }
+  if (group.category === "Review / Validation") {
+    return <ShieldCheck className="size-4" />;
+  }
+  if (group.category === "Protected") {
+    return <LockKeyhole className="size-4" />;
+  }
+  if (group.category === "Output") {
+    return <Upload className="size-4" />;
+  }
+  if (group.category === "AI / Agent") {
     return <PackageCheck className="size-4" />;
   }
   return <Zap className="size-4" />;
@@ -146,20 +180,23 @@ function ActionIcon({
   action: ActionType;
   className?: string;
 }) {
-  if (action.id === "preset:source") {
+  if (action.id.startsWith("source:")) {
     return <FileText className={cn(className, "text-sky-500")} />;
   }
-  if (action.id === "preset:logic") {
+  if (action.id.startsWith("logic:")) {
     return <Calculator className={cn(className, "text-emerald-500")} />;
   }
-  if (action.id === "preset:review-validation") {
+  if (action.id.startsWith("review:")) {
     return <ShieldCheck className={cn(className, "text-amber-500")} />;
   }
-  if (action.id === "preset:protected") {
+  if (action.id.startsWith("protected:")) {
     return <LockKeyhole className={cn(className, "text-violet-500")} />;
   }
-  if (action.id === "preset:output") {
+  if (action.id.startsWith("output:")) {
     return <Upload className={cn(className, "text-indigo-500")} />;
+  }
+  if (action.id.startsWith("ai:")) {
+    return <Zap className={cn(className, "text-fuchsia-500")} />;
   }
   if (action.integration) {
     return (
@@ -282,22 +319,7 @@ export function ActionGrid({
       groups[category].push(action);
     }
 
-    // Sort categories: System first, then alphabetically
-    const sortedCategories = Object.keys(groups).sort((a, b) => {
-      if (a === "Fiscal Workflow") {
-        return -1;
-      }
-      if (b === "Fiscal Workflow") {
-        return 1;
-      }
-      if (a === "System") {
-        return -1;
-      }
-      if (b === "System") {
-        return 1;
-      }
-      return a.localeCompare(b);
-    });
+    const sortedCategories = Object.keys(groups).sort(compareActionCategories);
 
     return sortedCategories.map((category) => ({
       category,

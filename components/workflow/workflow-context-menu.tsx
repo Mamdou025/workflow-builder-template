@@ -7,6 +7,7 @@ import { nanoid } from "nanoid";
 import { useCallback, useEffect, useRef } from "react";
 import { ConfirmOverlay } from "@/components/overlays/confirm-overlay";
 import { useOverlay } from "@/components/overlays/overlay-provider";
+import { createDefaultWorkflowBlockCandidate } from "@/lib/local-fiscal-workflow";
 import { cn } from "@/lib/utils";
 import {
   addNodeAtom,
@@ -83,22 +84,13 @@ export function WorkflowContextMenu({
   const handleAddStep = useCallback(() => {
     if (menuState?.flowPosition) {
       const nodeHeight = 192;
-      const newNode: WorkflowNode = {
+      const newNode: WorkflowNode = createDefaultWorkflowBlockCandidate({
         id: nanoid(),
-        type: "action",
         position: {
           x: menuState.flowPosition.x,
           y: menuState.flowPosition.y - nodeHeight / 2,
         },
-        data: {
-          label: "",
-          description: "",
-          type: "action",
-          config: {},
-          status: "idle",
-        },
-        selected: true,
-      };
+      });
       addNode(newNode);
       setSelectedNode(newNode.id);
       setActiveTab("properties");

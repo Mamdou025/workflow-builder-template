@@ -8,6 +8,7 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react";
+import { nanoid } from "nanoid";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
@@ -31,19 +32,35 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { EdgeInspector } from "@/components/workflow/edge-inspector";
 import { api } from "@/lib/api-client";
 import { integrationsAtom } from "@/lib/integrations-store";
 import {
   clearLocalRunRecords,
+  createCanvasEdgeFromWorkflowEdge,
+  createWorkflowBlockFromCatalog,
+  createWorkflowEdgeRecord,
+  createWorkflowNodeFromBlock,
   type FiscalStage,
+  getBlockCatalogItem,
   getFiscalPreset,
+  getFiscalVisualForFamily,
   getFiscalVisualForStage,
+  getPendingWorkflowConnection,
+  getUnsupportedWorkflowRelationshipMessage,
+  getWorkflowEdgeDefaults,
   isLocalWorkflowId,
+  loadLocalRunRecords,
+  type WorkflowEdge as SchemaWorkflowEdge,
+  saveLocalRunRecord,
   saveLocalWorkflowSnapshot,
+  type WorkflowBlock,
 } from "@/lib/local-fiscal-workflow";
 import type { IntegrationType } from "@/lib/types/integration";
 import { generateWorkflowCode } from "@/lib/workflow-codegen";
 import {
+  addNodeAtom,
+  autosaveAtom,
   clearNodeStatusesAtom,
   currentWorkflowIdAtom,
   currentWorkflowNameAtom,
@@ -51,6 +68,9 @@ import {
   deleteNodeAtom,
   deleteSelectedItemsAtom,
   edgesAtom,
+  executionLogsAtom,
+  hasUnsavedChangesAtom,
+  insertBlockBetweenEdgeAtom,
   isGeneratingAtom,
   isWorkflowOwnerAtom,
   newlyCreatedNodeIdAtom,
@@ -58,18 +78,25 @@ import {
   pendingIntegrationNodesAtom,
   propertiesPanelActiveTabAtom,
   selectedEdgeAtom,
+  selectedExecutionIdAtom,
   selectedNodeAtom,
   showClearDialogAtom,
   showDeleteDialogAtom,
+  updateEdgeDataAtom,
   updateNodeDataAtom,
+  type WorkflowEdge,
+  type WorkflowNodeData,
 } from "@/lib/workflow-store";
 import { findActionById } from "@/plugins";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { ActionConfig } from "./config/action-config";
 import { ActionGrid } from "./config/action-grid";
 import { FiscalBlockConfig } from "./config/fiscal-block-config";
-
 import { TriggerConfig } from "./config/trigger-config";
+import { BlockInspector } from "./inspector/block-inspector";
+import { InspectorApplyDiscard } from "./inspector/inspector-apply-discard";
+import { LocalAiPanel } from "./inspector/local-ai-panel";
+import { createInspectorLocalRunRecord } from "./inspector/mock-runs";
 import { generateNodeCode } from "./utils/code-generators";
 import { WorkflowRuns } from "./workflow-runs";
 
@@ -83,6 +110,11 @@ const SYSTEM_ACTION_INTEGRATIONS: Record<string, IntegrationType> = {
 };
 
 const VISUAL_LEVELS = ["L1", "L2", "L3"] as const;
+const VISUAL_LEVEL_LABELS: Record<(typeof VISUAL_LEVELS)[number], string> = {
+  L1: "Workflow stage",
+  L2: "Workflow block",
+  L3: "Source evidence",
+};
 const VISUAL_ROLES = [
   "stage",
   "step",
@@ -95,6 +127,26 @@ const VISUAL_ROLES = [
   "protected",
   "output",
 ] as const;
+
+function cloneWorkflowNodeData(data: WorkflowNodeData): WorkflowNodeData {
+  return JSON.parse(JSON.stringify(data)) as WorkflowNodeData;
+}
+
+function getSelectedObjectKey({
+  selectedEdgeId,
+  selectedNodeId,
+}: {
+  selectedEdgeId: string | null;
+  selectedNodeId: string | null;
+}) {
+  if (selectedEdgeId) {
+    return `edge:${selectedEdgeId}`;
+  }
+  if (selectedNodeId) {
+    return `node:${selectedNodeId}`;
+  }
+  return "workspace";
+}
 
 // Multi-selection panel component
 const MultiSelectionPanel = ({
@@ -181,13 +233,16 @@ export const PanelInner = () => {
   const edges = useAtomValue(edgesAtom);
   const [isGenerating] = useAtom(isGeneratingAtom);
   const [currentWorkflowId] = useAtom(currentWorkflowIdAtom);
+  const isLocalWorkflow = isLocalWorkflowId(currentWorkflowId);
   const [currentWorkflowName, setCurrentWorkflowName] = useAtom(
     currentWorkflowNameAtom
   );
   const isOwner = useAtomValue(isWorkflowOwnerAtom);
   const updateNodeData = useSetAtom(updateNodeDataAtom);
+  const updateEdgeData = useSetAtom(updateEdgeDataAtom);
   const deleteNode = useSetAtom(deleteNodeAtom);
   const deleteEdge = useSetAtom(deleteEdgeAtom);
+  const insertBlockBetweenEdge = useSetAtom(insertBlockBetweenEdgeAtom);
   const deleteSelectedItems = useSetAtom(deleteSelectedItemsAtom);
   const setShowClearDialog = useSetAtom(showClearDialogAtom);
   const setShowDeleteDialog = useSetAtom(showDeleteDialogAtom);
@@ -207,11 +262,68 @@ export const PanelInner = () => {
   );
   const selectedNode = nodes.find((node) => node.id === selectedNodeId);
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId);
+  const selectedEdgeSourceNode = selectedEdge
+    ? nodes.find((node) => node.id === selectedEdge.source)
+    : undefined;
+  const selectedEdgeTargetNode = selectedEdge
+    ? nodes.find((node) => node.id === selectedEdge.target)
+    : undefined;
+  const setEdges = useSetAtom(edgesAtom);
+  const addNode = useSetAtom(addNodeAtom);
+  const triggerAutosave = useSetAtom(autosaveAtom);
+  const setHasUnsavedChanges = useSetAtom(hasUnsavedChangesAtom);
+  const setExecutionLogs = useSetAtom(executionLogsAtom);
+  const setSelectedExecutionId = useSetAtom(selectedExecutionIdAtom);
+  const [draftNodeData, setDraftNodeData] = useState<WorkflowNodeData | null>(
+    null
+  );
+  const [draftEdge, setDraftEdge] = useState<SchemaWorkflowEdge | null>(null);
+  const [localRunVersion, setLocalRunVersion] = useState(0);
+  const selectedObjectKey = getSelectedObjectKey({
+    selectedEdgeId: selectedEdge?.id ?? null,
+    selectedNodeId: selectedNode?.id ?? null,
+  });
+  const previousSelectedObjectKeyRef = useRef<string | null>(null);
 
   // Count multiple selections
   const selectedNodes = nodes.filter((node) => node.selected);
   const selectedEdges = edges.filter((edge) => edge.selected);
   const hasMultipleSelections = selectedNodes.length + selectedEdges.length > 1;
+
+  useEffect(() => {
+    if (previousSelectedObjectKeyRef.current === selectedObjectKey) {
+      return;
+    }
+    previousSelectedObjectKeyRef.current = selectedObjectKey;
+
+    if (selectedEdge) {
+      setActiveTab("properties");
+      setDraftEdge(
+        selectedEdge.data?.workflowEdge ||
+          createWorkflowEdgeRecord({
+            id: selectedEdge.id,
+            reason: "Migrated visual connection to typed relationship.",
+            sourceBlockId: selectedEdge.source,
+            targetBlockId: selectedEdge.target,
+          })
+      );
+      setDraftNodeData(null);
+      return;
+    }
+
+    if (selectedNode) {
+      setActiveTab(
+        selectedNode.data.block?.family === "Logic" ? "code" : "properties"
+      );
+      setDraftNodeData(cloneWorkflowNodeData(selectedNode.data));
+      setDraftEdge(null);
+      return;
+    }
+
+    setActiveTab("properties");
+    setDraftNodeData(null);
+    setDraftEdge(null);
+  }, [selectedEdge, selectedNode, selectedObjectKey, setActiveTab]);
 
   // Switch to Properties tab if Code tab is hidden for the selected node
   useEffect(() => {
@@ -344,6 +456,22 @@ export const PanelInner = () => {
       deleteEdge(selectedEdgeId);
       setShowDeleteEdgeAlert(false);
     }
+  };
+
+  const handleInsertBlockBetweenEdge = (catalogId: string) => {
+    if (!selectedEdgeId) {
+      return;
+    }
+
+    const result = insertBlockBetweenEdge({
+      catalogId,
+      edgeId: selectedEdgeId,
+    });
+    if (result.ok) {
+      toast.success(result.message);
+      return;
+    }
+    toast.warning(result.message);
   };
 
   const handleDeleteAllRuns = async () => {
@@ -494,7 +622,10 @@ export const PanelInner = () => {
 
     const configWithoutActionType = Object.fromEntries(
       Object.entries(selectedNode.data.config ?? {}).filter(
-        ([key]) => key !== "actionType" && key !== "integrationId"
+        ([key]) =>
+          key !== "actionType" &&
+          key !== "blockCandidate" &&
+          key !== "integrationId"
       )
     );
 
@@ -515,6 +646,121 @@ export const PanelInner = () => {
         config: { ...configWithoutActionType, ...preset.config },
       },
     });
+  };
+
+  const createPendingRelationshipForBlock = (block: WorkflowBlock) => {
+    if (!selectedNode) {
+      return false;
+    }
+
+    const pendingConnection = getPendingWorkflowConnection(
+      selectedNode.data.config?.pendingConnection
+    );
+    if (!pendingConnection) {
+      return false;
+    }
+
+    const sourceBlock =
+      pendingConnection.sourceBlockId === block.id
+        ? block
+        : nodes.find((node) => node.id === pendingConnection.sourceBlockId)
+            ?.data.block;
+    const targetBlock =
+      pendingConnection.targetBlockId === block.id
+        ? block
+        : nodes.find((node) => node.id === pendingConnection.targetBlockId)
+            ?.data.block;
+    const edgeDefaults =
+      sourceBlock && targetBlock
+        ? getWorkflowEdgeDefaults({ sourceBlock, targetBlock })
+        : null;
+
+    if (!edgeDefaults) {
+      toast.warning(
+        getUnsupportedWorkflowRelationshipMessage({
+          sourceBlock,
+          targetBlock,
+        })
+      );
+      return false;
+    }
+
+    const relationshipExists = edges.some(
+      (edge) =>
+        edge.source === pendingConnection.sourceBlockId &&
+        edge.target === pendingConnection.targetBlockId
+    );
+    if (relationshipExists) {
+      return false;
+    }
+
+    const workflowEdge = createWorkflowEdgeRecord({
+      id: nanoid(),
+      sourceBlockId: pendingConnection.sourceBlockId,
+      targetBlockId: pendingConnection.targetBlockId,
+      relationshipType: edgeDefaults.relationshipType,
+      reason: edgeDefaults.reason,
+    });
+    const newEdge = {
+      ...createCanvasEdgeFromWorkflowEdge(workflowEdge),
+      sourceHandle: pendingConnection.sourceHandle,
+      targetHandle: pendingConnection.targetHandle,
+    };
+
+    setEdges([...edges, newEdge]);
+    setHasUnsavedChanges(true);
+    triggerAutosave({ immediate: true });
+    toast.success("Typed relationship created");
+    return true;
+  };
+
+  const handleApplyBlockCatalogItem = (catalogId: string) => {
+    if (!(selectedNode && selectedNode.data.type === "action")) {
+      return;
+    }
+
+    const catalogItem = getBlockCatalogItem(catalogId);
+    if (!catalogItem) {
+      return;
+    }
+
+    const configWithoutActionType = Object.fromEntries(
+      Object.entries(selectedNode.data.config ?? {}).filter(
+        ([key]) =>
+          key !== "actionType" &&
+          key !== "blockCandidate" &&
+          key !== "integrationId" &&
+          key !== "pendingConnection"
+      )
+    );
+    const block = createWorkflowBlockFromCatalog(catalogId, {
+      id: selectedNode.id,
+      label:
+        selectedNode.data.label && selectedNode.data.label.trim().length > 0
+          ? selectedNode.data.label
+          : catalogItem.label,
+      description:
+        selectedNode.data.description &&
+        selectedNode.data.description.trim().length > 0
+          ? selectedNode.data.description
+          : catalogItem.description,
+      position: selectedNode.position,
+      config: configWithoutActionType,
+    });
+    const visual = getFiscalVisualForFamily(block.family);
+
+    updateNodeData({
+      id: selectedNode.id,
+      data: {
+        label: block.label,
+        description: block.description,
+        visualLevel: visual.visualLevel,
+        visualRole: visual.visualRole,
+        config: block.config,
+        block,
+      },
+    });
+    createPendingRelationshipForBlock(block);
   };
 
   const handleUpdateVisualLevel = (value: string) => {
@@ -565,7 +811,12 @@ export const PanelInner = () => {
     setCurrentWorkflowName(newName);
 
     if (isLocalWorkflowId(currentWorkflowId)) {
-      saveLocalWorkflowSnapshot({ name: newName, nodes, edges });
+      saveLocalWorkflowSnapshot({
+        edges,
+        name: newName,
+        nodes,
+        status: "draft",
+      });
       return;
     }
 
@@ -598,6 +849,175 @@ export const PanelInner = () => {
     }
   };
 
+  const latestSelectedBlockRun = selectedNode?.data.block
+    ? loadLocalRunRecords().find((record) => {
+        if (localRunVersion < 0) {
+          return false;
+        }
+        return record.logs.some((log) => log.nodeId === selectedNode.id);
+      })
+    : undefined;
+
+  const nodeDraftDirty = Boolean(
+    selectedNode &&
+      draftNodeData &&
+      JSON.stringify(draftNodeData) !== JSON.stringify(selectedNode.data)
+  );
+  const selectedWorkflowEdge = selectedEdge?.data?.workflowEdge;
+  const edgeDraftDirty = Boolean(
+    selectedEdge &&
+      draftEdge &&
+      JSON.stringify(draftEdge) !== JSON.stringify(selectedWorkflowEdge)
+  );
+
+  const handleApplyNodeDraft = () => {
+    if (!(selectedNode && draftNodeData)) {
+      return;
+    }
+
+    const { status: _status, ...nodeDataToApply } = draftNodeData;
+    updateNodeData({
+      id: selectedNode.id,
+      data: nodeDataToApply,
+    });
+    toast.success("Inspector changes applied");
+  };
+
+  const handleDiscardNodeDraft = () => {
+    if (!selectedNode) {
+      return;
+    }
+    setDraftNodeData(cloneWorkflowNodeData(selectedNode.data));
+    toast.message("Pending inspector edits discarded");
+  };
+
+  const handleApplyEdgeDraft = () => {
+    if (!(selectedEdge && draftEdge)) {
+      return;
+    }
+
+    updateEdgeData({
+      id: selectedEdge.id,
+      updates: {
+        confidence: draftEdge.confidence,
+        notes: draftEdge.notes,
+        reason: draftEdge.reason,
+        relationshipType: draftEdge.relationshipType,
+        status: draftEdge.status,
+      },
+    });
+    toast.success("Relationship changes applied");
+  };
+
+  const handleDiscardEdgeDraft = () => {
+    if (!selectedEdge) {
+      return;
+    }
+    setDraftEdge(
+      selectedEdge.data?.workflowEdge ||
+        createWorkflowEdgeRecord({
+          id: selectedEdge.id,
+          reason: "Migrated visual connection to typed relationship.",
+          sourceBlockId: selectedEdge.source,
+          targetBlockId: selectedEdge.target,
+        })
+    );
+    toast.message("Pending relationship edits discarded");
+  };
+
+  const handleRunSelectedBlockMock = () => {
+    if (!(selectedNode && draftNodeData)) {
+      return;
+    }
+
+    const record = createInspectorLocalRunRecord({
+      data: draftNodeData,
+      edges,
+      node: selectedNode,
+    });
+    saveLocalRunRecord(record);
+    setSelectedExecutionId(record.execution.id);
+    setExecutionLogs(
+      Object.fromEntries(
+        record.logs.map((log) => [
+          log.nodeId,
+          {
+            nodeId: log.nodeId,
+            nodeName: log.nodeName,
+            nodeType: log.nodeType,
+            output: log.output,
+            status: log.status,
+          },
+        ])
+      )
+    );
+    updateNodeData({ id: selectedNode.id, data: { status: "success" } });
+    setLocalRunVersion((version) => version + 1);
+    toast.success("Local mock run recorded");
+  };
+
+  const handleCreateSourceLogic = (
+    variant: "annotation" | "correction" | "derived" | "override"
+  ) => {
+    if (!(selectedNode?.data.block && draftNodeData?.block)) {
+      return;
+    }
+
+    const sourceBlock = draftNodeData.block;
+    const catalogByVariant = {
+      annotation: "logic:classification-mapping",
+      correction: "logic:transformation",
+      derived: "logic:transformation",
+      override: "logic:formula",
+    } satisfies Record<typeof variant, string>;
+    const labelByVariant = {
+      annotation: `Annotation for ${sourceBlock.label}`,
+      correction: `Correction for ${sourceBlock.label}`,
+      derived: `Derived logic for ${sourceBlock.label}`,
+      override: `Override logic for ${sourceBlock.label}`,
+    } satisfies Record<typeof variant, string>;
+    const logicBlock = createWorkflowBlockFromCatalog(
+      catalogByVariant[variant],
+      {
+        id: nanoid(),
+        label: labelByVariant[variant],
+        position: {
+          x: selectedNode.position.x + 300,
+          y: selectedNode.position.y + 60,
+        },
+        config: {
+          inputs: sourceBlock.runtime.outputKey || sourceBlock.id,
+          sourceBlockId: sourceBlock.id,
+          sourceCorrectionVariant: variant,
+        },
+      }
+    );
+    const edgeDefaults = getWorkflowEdgeDefaults({
+      sourceBlock,
+      targetBlock: logicBlock,
+    });
+
+    addNode(createWorkflowNodeFromBlock(logicBlock, { selected: true }));
+
+    if (edgeDefaults) {
+      const workflowEdge = createWorkflowEdgeRecord({
+        id: nanoid(),
+        reason: edgeDefaults.reason,
+        relationshipType: edgeDefaults.relationshipType,
+        sourceBlockId: sourceBlock.id,
+        targetBlockId: logicBlock.id,
+      });
+      setEdges((currentEdges) => [
+        ...currentEdges.map((edge) => ({ ...edge, selected: false })),
+        createCanvasEdgeFromWorkflowEdge(workflowEdge),
+      ]);
+      setHasUnsavedChanges(true);
+      triggerAutosave({ immediate: true });
+    }
+
+    toast.success(`${logicBlock.label} created downstream`);
+  };
+
   // If multiple items are selected, show multi-selection properties
   if (hasMultipleSelections) {
     return (
@@ -611,46 +1031,126 @@ export const PanelInner = () => {
 
   // If an edge is selected, show edge properties
   if (selectedEdge) {
+    const edgeForInspector: WorkflowEdge = draftEdge
+      ? {
+          ...selectedEdge,
+          data: {
+            ...selectedEdge.data,
+            confidence: draftEdge.confidence,
+            relationshipType: draftEdge.relationshipType,
+            status: draftEdge.status,
+            workflowEdge: draftEdge,
+          },
+        }
+      : selectedEdge;
+
     return (
       <>
         <div className="flex size-full flex-col">
-          <div className="flex h-14 w-full shrink-0 items-center border-b bg-transparent px-4">
-            <h2 className="font-semibold text-foreground">Properties</h2>
-          </div>
-          <div className="flex-1 space-y-4 overflow-y-auto p-4">
-            <div className="space-y-2">
-              <Label className="ml-1" htmlFor="edge-id">
-                Edge ID
-              </Label>
-              <Input disabled id="edge-id" value={selectedEdge.id} />
-            </div>
-            <div className="space-y-2">
-              <Label className="ml-1" htmlFor="edge-source">
-                Source
-              </Label>
-              <Input disabled id="edge-source" value={selectedEdge.source} />
-            </div>
-            <div className="space-y-2">
-              <Label className="ml-1" htmlFor="edge-target">
-                Target
-              </Label>
-              <Input disabled id="edge-target" value={selectedEdge.target} />
-            </div>
-
-            {isOwner && (
-              <div className="flex items-center gap-2 pt-4">
-                <Button
-                  className="text-muted-foreground"
-                  onClick={() => setShowDeleteEdgeAlert(true)}
-                  size="sm"
-                  variant="ghost"
+          <Tabs
+            className="min-h-0 flex-1"
+            onValueChange={setActiveTab}
+            value={activeTab}
+          >
+            <TabsList className="h-14 w-full shrink-0 rounded-none border-b bg-transparent px-4 py-2.5">
+              <TabsTrigger
+                className="bg-transparent text-muted-foreground data-[state=active]:text-foreground data-[state=active]:shadow-none"
+                value="properties"
+              >
+                Properties
+              </TabsTrigger>
+              <TabsTrigger
+                className="bg-transparent text-muted-foreground data-[state=active]:text-foreground data-[state=active]:shadow-none"
+                value="code"
+              >
+                Code
+              </TabsTrigger>
+              <TabsTrigger
+                className="bg-transparent text-muted-foreground data-[state=active]:text-foreground data-[state=active]:shadow-none"
+                value="runs"
+              >
+                Runs
+              </TabsTrigger>
+              {isLocalWorkflow && (
+                <TabsTrigger
+                  className="bg-transparent text-muted-foreground data-[state=active]:text-foreground data-[state=active]:shadow-none"
+                  value="ai"
                 >
-                  <Trash2 className="mr-2 size-4" />
-                  Delete
-                </Button>
+                  AI
+                </TabsTrigger>
+              )}
+            </TabsList>
+            <InspectorApplyDiscard
+              dirty={edgeDraftDirty}
+              disabled={isGenerating || !isOwner}
+              onApply={handleApplyEdgeDraft}
+              onDiscard={handleDiscardEdgeDraft}
+            />
+            <TabsContent
+              className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
+              value="properties"
+            >
+              <div className="flex-1 overflow-y-auto p-4">
+                <EdgeInspector
+                  disabled={isGenerating || !isOwner}
+                  edge={edgeForInspector}
+                  onDelete={() => setShowDeleteEdgeAlert(true)}
+                  onInsertBlockBetween={handleInsertBlockBetweenEdge}
+                  onUpdate={(updates) =>
+                    setDraftEdge((current) =>
+                      current ? { ...current, ...updates } : current
+                    )
+                  }
+                  sourceBlock={selectedEdgeSourceNode?.data.block}
+                  targetBlock={selectedEdgeTargetNode?.data.block}
+                />
               </div>
+            </TabsContent>
+            <TabsContent
+              className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
+              value="code"
+            >
+              <div className="flex-1 space-y-4 overflow-y-auto p-4">
+                <pre className="max-h-80 overflow-auto rounded-md border bg-muted/30 p-3 text-xs">
+                  {JSON.stringify(draftEdge || selectedEdge.data, null, 2)}
+                </pre>
+                <div className="rounded-md border bg-muted/20 p-3 text-muted-foreground text-xs">
+                  Relationship validation is local-only in v1. Unsupported
+                  family pairs are prevented when new connections are created.
+                </div>
+              </div>
+            </TabsContent>
+            <TabsContent
+              className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
+              value="runs"
+            >
+              <div className="flex-1 space-y-4 overflow-y-auto p-4">
+                <pre className="overflow-auto rounded-md border bg-muted/30 p-3 text-xs">
+                  {JSON.stringify(
+                    {
+                      downstreamImpact: selectedEdge.target,
+                      mockTrace: `${selectedEdge.source} -> ${selectedEdge.target}`,
+                      relationshipType: draftEdge?.relationshipType,
+                      status: draftEdge?.status,
+                    },
+                    null,
+                    2
+                  )}
+                </pre>
+              </div>
+            </TabsContent>
+            {isLocalWorkflow && (
+              <TabsContent
+                className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
+                value="ai"
+              >
+                <LocalAiPanel
+                  disabled={isGenerating || !isOwner}
+                  workflowName={currentWorkflowName}
+                />
+              </TabsContent>
             )}
-          </div>
+          </Tabs>
         </div>
 
         <AlertDialog
@@ -706,6 +1206,14 @@ export const PanelInner = () => {
                 value="runs"
               >
                 Runs
+              </TabsTrigger>
+            )}
+            {isLocalWorkflow && (
+              <TabsTrigger
+                className="bg-transparent text-muted-foreground data-[state=active]:text-foreground data-[state=active]:shadow-none"
+                value="ai"
+              >
+                AI
               </TabsTrigger>
             )}
           </TabsList>
@@ -846,6 +1354,14 @@ export const PanelInner = () => {
               />
             </div>
           </TabsContent>
+          {isLocalWorkflow && (
+            <TabsContent className="flex flex-col overflow-hidden" value="ai">
+              <LocalAiPanel
+                disabled={isGenerating || !isOwner}
+                workflowName={currentWorkflowName}
+              />
+            </TabsContent>
+          )}
         </Tabs>
 
         <AlertDialog
@@ -872,10 +1388,157 @@ export const PanelInner = () => {
     );
   }
 
+  if (
+    selectedNode.data.block &&
+    !selectedNode.data.config?.blockCandidate &&
+    draftNodeData
+  ) {
+    return (
+      <>
+        <Tabs
+          className="size-full"
+          data-testid="properties-panel"
+          onValueChange={setActiveTab}
+          value={activeTab}
+        >
+          <TabsList className="h-14 w-full shrink-0 rounded-none border-b bg-transparent px-4 py-2.5">
+            <TabsTrigger
+              className="bg-transparent text-muted-foreground data-[state=active]:text-foreground data-[state=active]:shadow-none"
+              value="properties"
+            >
+              Properties
+            </TabsTrigger>
+            <TabsTrigger
+              className="bg-transparent text-muted-foreground data-[state=active]:text-foreground data-[state=active]:shadow-none"
+              value="code"
+            >
+              Code
+            </TabsTrigger>
+            {isOwner && (
+              <TabsTrigger
+                className="bg-transparent text-muted-foreground data-[state=active]:text-foreground data-[state=active]:shadow-none"
+                value="runs"
+              >
+                Runs
+              </TabsTrigger>
+            )}
+            {isLocalWorkflow && (
+              <TabsTrigger
+                className="bg-transparent text-muted-foreground data-[state=active]:text-foreground data-[state=active]:shadow-none"
+                value="ai"
+              >
+                AI
+              </TabsTrigger>
+            )}
+          </TabsList>
+          <InspectorApplyDiscard
+            dirty={nodeDraftDirty}
+            disabled={isGenerating || !isOwner}
+            onApply={handleApplyNodeDraft}
+            onDiscard={handleDiscardNodeDraft}
+          />
+          <TabsContent
+            className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
+            value="properties"
+          >
+            <BlockInspector
+              disabled={isGenerating || !isOwner}
+              draftData={draftNodeData}
+              edges={edges}
+              lastRun={latestSelectedBlockRun}
+              nodes={nodes}
+              onCreateSourceLogic={handleCreateSourceLogic}
+              onRunMockTest={handleRunSelectedBlockMock}
+              setDraftData={setDraftNodeData}
+              tab="properties"
+            />
+          </TabsContent>
+          <TabsContent
+            className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden data-[state=inactive]:hidden"
+            forceMount
+            value="code"
+          >
+            <BlockInspector
+              disabled={isGenerating || !isOwner}
+              draftData={draftNodeData}
+              edges={edges}
+              lastRun={latestSelectedBlockRun}
+              nodes={nodes}
+              onCreateSourceLogic={handleCreateSourceLogic}
+              onRunMockTest={handleRunSelectedBlockMock}
+              setDraftData={setDraftNodeData}
+              tab="code"
+            />
+          </TabsContent>
+          {isOwner && (
+            <TabsContent
+              className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
+              value="runs"
+            >
+              <BlockInspector
+                disabled={isGenerating || !isOwner}
+                draftData={draftNodeData}
+                edges={edges}
+                lastRun={latestSelectedBlockRun}
+                nodes={nodes}
+                onCreateSourceLogic={handleCreateSourceLogic}
+                onRunMockTest={handleRunSelectedBlockMock}
+                setDraftData={setDraftNodeData}
+                tab="runs"
+              />
+            </TabsContent>
+          )}
+          {isLocalWorkflow && (
+            <TabsContent
+              className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
+              value="ai"
+            >
+              <LocalAiPanel
+                disabled={isGenerating || !isOwner}
+                workflowName={currentWorkflowName}
+              />
+            </TabsContent>
+          )}
+        </Tabs>
+
+        <AlertDialog
+          onOpenChange={setShowDeleteNodeAlert}
+          open={showDeleteNodeAlert}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete Block</AlertDialogTitle>
+              <AlertDialogDescription>
+                Are you sure you want to delete this block? This action cannot
+                be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={handleDelete}>
+                Delete
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </>
+    );
+  }
+
   const hasFiscalConfig = Boolean(
     selectedNode.data.config?.fiscalStage ||
       (!selectedNode.data.config?.actionType && selectedNode.data.visualRole)
   );
+  const sourceEvidenceLocked = Boolean(
+    selectedNode.data.block?.source?.treatedAsEvidence &&
+      selectedNode.data.block.source.immutable
+  );
+  const protectedNeedsUnlock = Boolean(
+    selectedNode.data.block?.governance?.requiresUnlockToEdit &&
+      !selectedNode.data.config?.protectedEditIntent
+  );
+  const identityFieldsDisabled =
+    isGenerating || !isOwner || sourceEvidenceLocked || protectedNeedsUnlock;
 
   return (
     <>
@@ -912,6 +1575,14 @@ export const PanelInner = () => {
               Runs
             </TabsTrigger>
           )}
+          {isLocalWorkflow && (
+            <TabsTrigger
+              className="bg-transparent text-muted-foreground data-[state=active]:text-foreground data-[state=active]:shadow-none"
+              value="ai"
+            >
+              AI
+            </TabsTrigger>
+          )}
         </TabsList>
         <TabsContent
           className="flex flex-col overflow-hidden"
@@ -929,6 +1600,14 @@ export const PanelInner = () => {
                   onSelectAction={(actionType) => {
                     if (actionType.startsWith("preset:")) {
                       handleApplyVisualPreset(actionType);
+                      if (selectedNode?.id === newlyCreatedNodeId) {
+                        setNewlyCreatedNodeId(null);
+                      }
+                      return;
+                    }
+
+                    if (getBlockCatalogItem(actionType)) {
+                      handleApplyBlockCatalogItem(actionType);
                       if (selectedNode?.id === newlyCreatedNodeId) {
                         setNewlyCreatedNodeId(null);
                       }
@@ -997,7 +1676,7 @@ export const PanelInner = () => {
               selectedNode.data.visualLevel ? (
                 <>
                   <div className="space-y-2">
-                    <Label className="ml-1">Visual Type</Label>
+                    <Label className="ml-1">Canvas Shape</Label>
                     <div className="grid grid-cols-2 gap-2">
                       <Select
                         disabled={!isOwner || isGenerating}
@@ -1005,12 +1684,12 @@ export const PanelInner = () => {
                         value={selectedNode.data.visualLevel || "L2"}
                       >
                         <SelectTrigger>
-                          <SelectValue placeholder="Visual level" />
+                          <SelectValue placeholder="Shape style" />
                         </SelectTrigger>
                         <SelectContent>
                           {VISUAL_LEVELS.map((level) => (
                             <SelectItem key={level} value={level}>
-                              {level}
+                              {VISUAL_LEVEL_LABELS[level]}
                             </SelectItem>
                           ))}
                         </SelectContent>
@@ -1041,7 +1720,7 @@ export const PanelInner = () => {
                       Label
                     </Label>
                     <Input
-                      disabled={isGenerating || !isOwner}
+                      disabled={identityFieldsDisabled}
                       id="label"
                       onChange={(e) => handleUpdateLabel(e.target.value)}
                       value={selectedNode.data.label}
@@ -1053,7 +1732,7 @@ export const PanelInner = () => {
                       Description
                     </Label>
                     <Input
-                      disabled={isGenerating || !isOwner}
+                      disabled={identityFieldsDisabled}
                       id="description"
                       onChange={(e) => handleUpdateDescription(e.target.value)}
                       placeholder="Optional description"
@@ -1215,6 +1894,14 @@ export const PanelInner = () => {
                 onRefreshRef={refreshRunsRef}
               />
             </div>
+          </TabsContent>
+        )}
+        {isLocalWorkflow && (
+          <TabsContent className="flex flex-col overflow-hidden" value="ai">
+            <LocalAiPanel
+              disabled={isGenerating || !isOwner}
+              workflowName={currentWorkflowName}
+            />
           </TabsContent>
         )}
       </Tabs>

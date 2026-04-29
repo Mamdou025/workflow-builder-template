@@ -1,5 +1,6 @@
 import {
   BaseEdge,
+  EdgeLabelRenderer,
   type EdgeProps,
   getBezierPath,
   getSimpleBezierPath,
@@ -8,6 +9,16 @@ import {
   Position,
   useInternalNode,
 } from "@xyflow/react";
+import type { WorkflowEdge as SchemaWorkflowEdge } from "@/lib/local-fiscal-workflow";
+import {
+  formatRelationshipType,
+  getEdgeLabelClassName,
+  getEdgeStatusClasses,
+} from "@/components/workflow/utils/edge-relationships";
+
+const EDGE_SELECTED_STROKE = "rgb(103 232 249)";
+const EDGE_SELECTED_GLOW = "rgba(34, 211, 238, 0.75)";
+const EDGE_TEMPORARY_STROKE = "rgb(248 250 252)";
 
 const Temporary = ({
   id,
@@ -29,15 +40,31 @@ const Temporary = ({
   });
 
   return (
-    <BaseEdge
-      className="stroke-1"
-      id={id}
-      path={edgePath}
-      style={{
-        stroke: selected ? "var(--muted-foreground)" : "var(--border)",
-        strokeDasharray: "5, 5",
-      }}
-    />
+    <>
+      {selected && (
+        <BaseEdge
+          id={`${id}-glow`}
+          path={edgePath}
+          style={{
+            filter: "drop-shadow(0 0 10px rgba(34, 211, 238, 0.9))",
+            opacity: 0.5,
+            stroke: EDGE_SELECTED_GLOW,
+            strokeDasharray: "5, 5",
+            strokeWidth: 7,
+          }}
+        />
+      )}
+      <BaseEdge
+        className="stroke-1"
+        id={id}
+        path={edgePath}
+        style={{
+          stroke: selected ? EDGE_SELECTED_STROKE : EDGE_TEMPORARY_STROKE,
+          strokeDasharray: "5, 5",
+          strokeWidth: selected ? 3.5 : 2.75,
+        }}
+      />
+    </>
   );
 };
 
@@ -104,7 +131,14 @@ const getEdgeParams = (
   };
 };
 
-const Animated = ({ id, source, target, style, selected }: EdgeProps) => {
+const Animated = ({
+  data,
+  id,
+  selected,
+  source,
+  style,
+  target,
+}: EdgeProps) => {
   const sourceNode = useInternalNode(source);
   const targetNode = useInternalNode(target);
 
@@ -125,19 +159,58 @@ const Animated = ({ id, source, target, style, selected }: EdgeProps) => {
     targetY: ty,
     targetPosition: targetPos,
   });
+  const workflowEdge = data?.workflowEdge as SchemaWorkflowEdge | undefined;
+  const statusClasses = getEdgeStatusClasses(workflowEdge?.status);
+  const showLabel = Boolean(
+    workflowEdge && (selected || workflowEdge.status !== "active")
+  );
+  const relationshipLabel = workflowEdge
+    ? formatRelationshipType(workflowEdge.relationshipType)
+    : "";
+  const labelX = (sx + tx) / 2;
+  const labelY = (sy + ty) / 2;
 
   return (
-    <BaseEdge 
-      id={id} 
-      path={edgePath} 
-      style={{
-        ...style,
-        stroke: selected ? "var(--muted-foreground)" : "var(--border)",
-        strokeWidth: 2,
-        animation: "dashdraw 0.5s linear infinite",
-        strokeDasharray: 5,
-      }}
-    />
+    <>
+      {selected && (
+        <BaseEdge
+          id={`${id}-glow`}
+          path={edgePath}
+          style={{
+            filter: "drop-shadow(0 0 12px rgba(34, 211, 238, 0.95))",
+            opacity: 0.55,
+            stroke: EDGE_SELECTED_GLOW,
+            strokeDasharray: statusClasses.strokeDasharray,
+            strokeWidth: 10,
+          }}
+        />
+      )}
+      <BaseEdge
+        id={id}
+        path={edgePath}
+        style={{
+          ...style,
+          opacity: workflowEdge?.status === "disabled" ? 0.55 : 1,
+          stroke: selected ? EDGE_SELECTED_STROKE : statusClasses.stroke,
+          strokeDasharray: statusClasses.strokeDasharray,
+          strokeWidth: selected ? 5.25 : 3.75,
+        }}
+      />
+      {showLabel && (
+        <EdgeLabelRenderer>
+          <div
+            className={getEdgeLabelClassName(workflowEdge?.status)}
+            style={{
+              position: "absolute",
+              transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+            }}
+            title={workflowEdge?.reason}
+          >
+            {relationshipLabel}
+          </div>
+        </EdgeLabelRenderer>
+      )}
+    </>
   );
 };
 

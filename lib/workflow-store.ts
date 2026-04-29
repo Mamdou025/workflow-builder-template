@@ -1,10 +1,24 @@
 import type { Edge, EdgeChange, Node, NodeChange } from "@xyflow/react";
 import { applyEdgeChanges, applyNodeChanges } from "@xyflow/react";
 import { atom } from "jotai";
+import { nanoid } from "nanoid";
 import { api } from "./api-client";
+import type {
+  BlockCatalogItem,
+  WorkflowBlock,
+  WorkflowEdge as WorkflowSchemaEdge,
+} from "./local-fiscal-workflow";
 import {
+  createCanvasEdgeFromWorkflowEdge,
+  createSplitWorkflowEdgeRecords,
+  createWorkflowBlockFromCatalog,
+  createWorkflowEdgeRecord,
+  createWorkflowNodeFromBlock,
+  getBlockCatalogItem,
+  getWorkflowEdgeDefaults,
   isLocalWorkflowId,
   saveLocalWorkflowSnapshot,
+  updateWorkflowEdgeRecord,
 } from "./local-fiscal-workflow";
 
 export type WorkflowNodeType = "trigger" | "action" | "add";
@@ -27,12 +41,19 @@ export type WorkflowNodeData = {
     | "protected"
     | "output";
   status?: "idle" | "running" | "success" | "error";
+  block?: WorkflowBlock;
   enabled?: boolean; // Whether the step is enabled (defaults to true)
   onClick?: () => void; // For the "add" node type
 };
 
 export type WorkflowNode = Node<WorkflowNodeData>;
-export type WorkflowEdge = Edge;
+export type WorkflowEdgeData = Record<string, unknown> & {
+  workflowEdge?: WorkflowSchemaEdge;
+  relationshipType?: WorkflowSchemaEdge["relationshipType"];
+  status?: WorkflowSchemaEdge["status"];
+  confidence?: number;
+};
+export type WorkflowEdge = Edge<WorkflowEdgeData>;
 
 // Workflow visibility type
 export type WorkflowVisibility = "private" | "public";
@@ -42,6 +63,7 @@ export const nodesAtom = atom<WorkflowNode[]>([]);
 export const edgesAtom = atom<WorkflowEdge[]>([]);
 export const selectedNodeAtom = atom<string | null>(null);
 export const selectedEdgeAtom = atom<string | null>(null);
+export const localWorkflowRevisionAtom = atom(0);
 export const isExecutingAtom = atom(false);
 export const isLoadingAtom = atom(false);
 export const isGeneratingAtom = atom(false);
@@ -85,6 +107,142 @@ export type ExecutionLogEntry = {
 // Map of nodeId -> execution log entry for the currently selected execution
 export const executionLogsAtom = atom<Record<string, ExecutionLogEntry>>({});
 
+const SOURCE_LOCKED_CONFIG_KEYS = [
+  "sourceLabel",
+  "sourceLocator",
+  "sourceValue",
+  "valuePreview",
+] as const;
+
+function isSourceEvidenceLocked(node: WorkflowNode): boolean {
+  return Boolean(
+    node.data.block?.source?.treatedAsEvidence &&
+      node.data.block.source.immutable
+  );
+}
+
+function getConfigWithLockedSourceFields(
+  node: WorkflowNode,
+  config: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined {
+  if (!(config && isSourceEvidenceLocked(node))) {
+    return config;
+  }
+
+  const currentConfig = node.data.config || {};
+  const nextConfig = { ...config };
+  for (const key of SOURCE_LOCKED_CONFIG_KEYS) {
+    if (key in currentConfig) {
+      nextConfig[key] = currentConfig[key];
+    }
+  }
+  return nextConfig;
+}
+
+function getUpdatedSourceMetadata(
+  block: WorkflowBlock,
+  nextConfig: Record<string, unknown>
+): WorkflowBlock["source"] {
+  if (!block.source) {
+    return;
+  }
+
+  let locator = block.source.locator;
+  if (!block.source.locatorLocked) {
+    locator = String(nextConfig.sourceLocator || block.source.locator);
+  }
+
+  let valuePreview = block.source.valuePreview;
+  if (
+    !block.source.valuesLocked &&
+    typeof nextConfig.valuePreview === "string"
+  ) {
+    valuePreview = nextConfig.valuePreview;
+  }
+
+  return {
+    ...block.source,
+    locator,
+    valuePreview,
+  };
+}
+
+function getUpdatedGovernanceMetadata(
+  block: WorkflowBlock,
+  nextConfig: Record<string, unknown>
+): WorkflowBlock["governance"] {
+  if (!block.governance) {
+    return;
+  }
+
+  return {
+    ...block.governance,
+    editIntent:
+      typeof nextConfig.protectedEditIntent === "string"
+        ? nextConfig.protectedEditIntent
+        : block.governance.editIntent,
+  };
+}
+
+function getUpdatedEmbeddedBlock(
+  node: WorkflowNode,
+  nextData: WorkflowNodeData
+): WorkflowBlock | undefined {
+  if (!node.data.block) {
+    return nextData.block;
+  }
+
+  const block = nextData.block || node.data.block;
+  const nextConfig = nextData.config || block.config;
+
+  return {
+    ...block,
+    label: nextData.label,
+    description: nextData.description || "",
+    position: node.position,
+    config: nextConfig,
+    source: getUpdatedSourceMetadata(block, nextConfig),
+    governance: getUpdatedGovernanceMetadata(block, nextConfig),
+    runtime: {
+      ...block.runtime,
+      outputKey:
+        typeof nextConfig.outputs === "string"
+          ? nextConfig.outputs
+          : block.runtime.outputKey,
+    },
+    updatedBy: "workflow-studio",
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function getUpdatedNodeData(
+  node: WorkflowNode,
+  data: Partial<WorkflowNodeData>
+): WorkflowNodeData {
+  const sourceLabelLocked = Boolean(
+    node.data.block?.source?.treatedAsEvidence &&
+      node.data.block.source.labelLocked
+  );
+  const nextConfig = getConfigWithLockedSourceFields(
+    node,
+    data.config || node.data.config
+  );
+  const nextData: WorkflowNodeData = {
+    ...node.data,
+    ...data,
+    label:
+      sourceLabelLocked && data.label !== undefined
+        ? node.data.label
+        : (data.label ?? node.data.label),
+    config: nextConfig,
+  };
+
+  return {
+    ...nextData,
+    block: getUpdatedEmbeddedBlock(node, nextData),
+  };
+}
+
 // Autosave functionality
 let autosaveTimeoutId: NodeJS.Timeout | null = null;
 const AUTOSAVE_DELAY = 1000; // 1 second debounce for field typing
@@ -106,7 +264,13 @@ export const autosaveAtom = atom(
     const saveFunc = async () => {
       try {
         if (isLocalWorkflowId(workflowId)) {
-          saveLocalWorkflowSnapshot({ name: workflowName, nodes, edges });
+          saveLocalWorkflowSnapshot({
+            edges,
+            name: workflowName,
+            nodes,
+            status: "draft",
+          });
+          set(localWorkflowRevisionAtom, get(localWorkflowRevisionAtom) + 1);
           set(hasUnsavedChangesAtom, false);
           return;
         }
@@ -148,10 +312,25 @@ export const onNodesChangeAtom = atom(
       return true;
     });
 
-    const newNodes = applyNodeChanges(
+    const changedNodes = applyNodeChanges(
       filteredChanges,
       currentNodes
     ) as WorkflowNode[];
+    const newNodes = changedNodes.map((node) =>
+      node.data.block
+        ? {
+            ...node,
+            data: {
+              ...node.data,
+              block: {
+                ...node.data.block,
+                position: node.position,
+                updatedAt: new Date().toISOString(),
+              },
+            },
+          }
+        : node
+    );
     set(nodesAtom, newNodes);
 
     // Sync selection state with selectedNodeAtom
@@ -208,6 +387,7 @@ export const onEdgesChangeAtom = atom(
       set(selectedEdgeAtom, selectedEdge.id);
       // Clear node selection when an edge is selected
       set(selectedNodeAtom, null);
+      set(propertiesPanelActiveTabAtom, "properties");
     } else if (get(selectedEdgeAtom)) {
       // If no edge is selected in ReactFlow but we have a selection, clear it
       const currentSelection = get(selectedEdgeAtom);
@@ -235,7 +415,20 @@ export const addNodeAtom = atom(null, (get, set, node: WorkflowNode) => {
 
   // Deselect all existing nodes and add new node as selected
   const updatedNodes = currentNodes.map((n) => ({ ...n, selected: false }));
-  const newNode = { ...node, selected: true };
+  const newNode = {
+    ...node,
+    selected: true,
+    data: node.data.block
+      ? {
+          ...node.data,
+          block: {
+            ...node.data.block,
+            position: node.position,
+            updatedAt: new Date().toISOString(),
+          },
+        }
+      : node.data,
+  };
   const newNodes = [...updatedNodes, newNode];
   set(nodesAtom, newNodes);
 
@@ -262,13 +455,18 @@ export const updateNodeDataAtom = atom(
     // Check if label is being updated
     const oldNode = currentNodes.find((node) => node.id === id);
     const oldLabel = oldNode?.data.label;
-    const newLabel = data.label;
+    const newLabel =
+      oldNode?.data.block?.source?.treatedAsEvidence &&
+      oldNode.data.block.source.labelLocked &&
+      data.label !== undefined
+        ? oldNode.data.label
+        : data.label;
     const isLabelChange = newLabel !== undefined && oldLabel !== newLabel;
 
     const newNodes = currentNodes.map((node) => {
       if (node.id === id) {
         // Update the node itself
-        return { ...node, data: { ...node.data, ...data } };
+        return { ...node, data: getUpdatedNodeData(node, data) };
       }
 
       // If label changed, update all templates in other nodes that reference this node
@@ -411,6 +609,186 @@ export const deleteEdgeAtom = atom(null, (get, set, edgeId: string) => {
   // Trigger immediate autosave
   set(autosaveAtom, { immediate: true });
 });
+
+export const updateEdgeDataAtom = atom(
+  null,
+  (
+    get,
+    set,
+    {
+      id,
+      updates,
+    }: {
+      id: string;
+      updates: Partial<
+        Pick<
+          WorkflowSchemaEdge,
+          "confidence" | "notes" | "reason" | "relationshipType" | "status"
+        >
+      >;
+    }
+  ) => {
+    const currentEdges = get(edgesAtom);
+    const newEdges = currentEdges.map((edge) => {
+      if (edge.id !== id) {
+        return edge;
+      }
+
+      const currentWorkflowEdge =
+        edge.data?.workflowEdge ||
+        createWorkflowEdgeRecord({
+          id: edge.id,
+          sourceBlockId: edge.source,
+          targetBlockId: edge.target,
+          reason: "Migrated visual connection to typed relationship.",
+        });
+      const workflowEdge = updateWorkflowEdgeRecord(
+        currentWorkflowEdge,
+        updates
+      );
+      const canvasEdge = createCanvasEdgeFromWorkflowEdge(workflowEdge);
+
+      return {
+        ...edge,
+        ...canvasEdge,
+        selected: edge.selected,
+        sourceHandle: edge.sourceHandle,
+        targetHandle: edge.targetHandle,
+      };
+    });
+
+    set(edgesAtom, newEdges);
+    set(hasUnsavedChangesAtom, true);
+    set(autosaveAtom);
+  }
+);
+
+function getInsertedBlockPosition({
+  sourceNode,
+  targetNode,
+}: {
+  sourceNode: WorkflowNode;
+  targetNode: WorkflowNode;
+}) {
+  return {
+    x: (sourceNode.position.x + targetNode.position.x) / 2,
+    y: (sourceNode.position.y + targetNode.position.y) / 2,
+  };
+}
+
+function getCatalogItemOrFallback(catalogId: string): BlockCatalogItem | null {
+  return (
+    getBlockCatalogItem(catalogId) ||
+    getBlockCatalogItem("logic:transformation") ||
+    null
+  );
+}
+
+export const insertBlockBetweenEdgeAtom = atom(
+  null,
+  (get, set, { catalogId, edgeId }: { catalogId: string; edgeId: string }) => {
+    const currentNodes = get(nodesAtom);
+    const currentEdges = get(edgesAtom);
+    const edge = currentEdges.find((item) => item.id === edgeId);
+    const sourceNode = edge
+      ? currentNodes.find((node) => node.id === edge.source)
+      : undefined;
+    const targetNode = edge
+      ? currentNodes.find((node) => node.id === edge.target)
+      : undefined;
+    const sourceBlock = sourceNode?.data.block;
+    const targetBlock = targetNode?.data.block;
+    const catalogItem = getCatalogItemOrFallback(catalogId);
+
+    if (
+      !(
+        edge &&
+        sourceNode &&
+        targetNode &&
+        sourceBlock &&
+        targetBlock &&
+        catalogItem
+      )
+    ) {
+      return {
+        ok: false,
+        message: "Unable to split this relationship safely.",
+      };
+    }
+
+    const insertedBlock = createWorkflowBlockFromCatalog(catalogItem.id, {
+      id: nanoid(),
+      label: `${catalogItem.label} between ${sourceBlock.label} and ${targetBlock.label}`,
+      description: "Inserted between an existing typed workflow relationship.",
+      position: getInsertedBlockPosition({ sourceNode, targetNode }),
+      status: "draft",
+    });
+    const sourceDefaults = getWorkflowEdgeDefaults({
+      sourceBlock,
+      targetBlock: insertedBlock,
+    });
+    const targetDefaults = getWorkflowEdgeDefaults({
+      sourceBlock: insertedBlock,
+      targetBlock,
+    });
+
+    if (!(sourceDefaults && targetDefaults)) {
+      return {
+        ok: false,
+        message:
+          "That block cannot be inserted between this source and target with supported relationship types.",
+      };
+    }
+
+    const originalWorkflowEdge =
+      edge.data?.workflowEdge ||
+      createWorkflowEdgeRecord({
+        id: edge.id,
+        sourceBlockId: edge.source,
+        targetBlockId: edge.target,
+        reason: "Migrated visual connection before splitting.",
+      });
+    const [sourceToInserted, insertedToTarget] = createSplitWorkflowEdgeRecords(
+      {
+        insertedBlock,
+        originalEdge: {
+          ...originalWorkflowEdge,
+          relationshipType: sourceDefaults.relationshipType,
+          reason: `${sourceDefaults.reason} Split from ${originalWorkflowEdge.id}.`,
+        },
+      }
+    );
+    const targetEdge = {
+      ...insertedToTarget,
+      relationshipType: targetDefaults.relationshipType,
+      reason: `${targetDefaults.reason} Split from ${originalWorkflowEdge.id}.`,
+    };
+    const insertedNode = createWorkflowNodeFromBlock(insertedBlock, {
+      selected: true,
+    });
+    const newNodes: WorkflowNode[] = [
+      ...currentNodes.map((node) => ({ ...node, selected: false })),
+      insertedNode,
+    ];
+    const newEdges: WorkflowEdge[] = [
+      ...currentEdges
+        .filter((item) => item.id !== edge.id)
+        .map((item) => ({ ...item, selected: false })),
+      createCanvasEdgeFromWorkflowEdge(sourceToInserted),
+      createCanvasEdgeFromWorkflowEdge(targetEdge),
+    ];
+
+    set(nodesAtom, newNodes);
+    set(edgesAtom, newEdges);
+    set(selectedNodeAtom, insertedBlock.id);
+    set(selectedEdgeAtom, null);
+    set(propertiesPanelActiveTabAtom, "properties");
+    set(hasUnsavedChangesAtom, true);
+    set(autosaveAtom, { immediate: true });
+
+    return { ok: true, message: `${insertedBlock.label} inserted.` };
+  }
+);
 
 export const deleteSelectedItemsAtom = atom(null, (get, set) => {
   // Save current state to history before making changes

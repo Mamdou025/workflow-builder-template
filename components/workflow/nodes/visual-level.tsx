@@ -50,7 +50,7 @@ const VISUAL_LEVEL_STYLES: Record<VisualLevel, VisualLevelStyle> = {
       "h-24 w-64 rounded-xl border-2 border-orange-400/75 bg-[#211f28] shadow-[0_0_0_1px_rgba(251,146,60,0.18),0_18px_40px_-24px_rgba(249,115,22,0.9)]",
     nodeClassName:
       "h-24 w-64 overflow-visible rounded-xl border-0 bg-transparent p-0 shadow-none",
-    placeholderDescription: "High-level stage",
+    placeholderDescription: "Workflow stage",
   },
   L2: {
     Icon: Calculator,
@@ -63,7 +63,7 @@ const VISUAL_LEVEL_STYLES: Record<VisualLevel, VisualLevelStyle> = {
       "size-24 rounded-lg border-2 border-emerald-400/75 bg-[#211f28] shadow-[0_0_0_1px_rgba(52,211,153,0.18),0_18px_40px_-24px_rgba(16,185,129,0.9)]",
     nodeClassName:
       "size-24 overflow-visible rounded-lg border-0 bg-transparent p-0 shadow-none",
-    placeholderDescription: "Calculation block",
+    placeholderDescription: "Workflow block",
   },
   L3: {
     Icon: FileText,
@@ -76,7 +76,7 @@ const VISUAL_LEVEL_STYLES: Record<VisualLevel, VisualLevelStyle> = {
       "size-24 rounded-l-3xl rounded-r-lg border-2 border-dashed border-sky-400/75 bg-[#211f28] shadow-[0_0_0_1px_rgba(56,189,248,0.18),0_18px_40px_-24px_rgba(14,165,233,0.9)]",
     nodeClassName:
       "size-24 overflow-visible rounded-l-3xl rounded-r-lg border-0 bg-transparent p-0 shadow-none",
-    placeholderDescription: "Source / evidence",
+    placeholderDescription: "Source evidence",
   },
 };
 
@@ -128,7 +128,7 @@ export function getVisualBadgeText(
       ? "Review / Validation"
       : role.charAt(0).toUpperCase() + role.slice(1);
 
-  return `${visualLevel} / ${roleLabel}`;
+  return roleLabel;
 }
 
 export function getVisualPlaceholderDescription(
